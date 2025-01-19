@@ -1,0 +1,23 @@
+[package]
+name = "qndview"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+[[bin]]
+name = "qndview"
+path = "src/main.rs"
+
+[dependencies]
+bytemuck = "1.21.0"
+cgmath = "0.18.0"
+ggez = "0.9.3"
+rand = "0.8.5"
+rayon = "1.10.0"
+wgpu = "0.16"
+
+[features]
+default = ["avx2"]
+no-simd = []
+avx2 = []
+avx512 = []

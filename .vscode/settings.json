@@ -1,0 +1,4 @@
+{
+  "rust-analyzer.cargo.features": ["avx512"],
+  "rust-analyzer.check.features": ["avx512"],
+}

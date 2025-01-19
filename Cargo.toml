@@ -1,6 +1,4 @@
-[package]
-name = "raytrace"
-version = "0.1.0"
+[workspace]
+members = ["lumaray", "qndview"]
 edition = "2021"
-
-[dependencies]
+resolver = "2"
