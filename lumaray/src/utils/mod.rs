@@ -9,3 +9,5 @@ pub mod timer;
 pub use timer::Timer;
 
 pub mod constconstrain;
+
+pub mod alignedmem;

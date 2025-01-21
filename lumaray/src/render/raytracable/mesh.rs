@@ -17,7 +17,7 @@ use ultraviolet::{DVec3, Vec3};
 #[cfg(any(feature = "avx2", feature = "avx512"))]
 use std::arch::x86_64::*;
 
-use crate::render::AABB;
+use crate::{render::AABB, utils::alignedmem::AlignedF32x16};
 
 use super::{
     bvh::{TwoRay, BVH},
@@ -29,357 +29,11 @@ pub struct SimpleTriangle {
     pub vertices: [Vec3; 3],
 }
 
-#[cfg(feature = "no-simd")]
-#[derive(Debug, Clone)]
-pub struct TriangleChunk {
-    pub vertices: [Vec3; 3],
-}
-
-#[cfg(feature = "no-simd")]
-pub const MESH_CHUNK_SIZE: usize = 8;
-
-#[cfg(all(feature = "avx2", not(feature = "no-simd"), not(feature = "avx512")))]
-#[derive(Debug, Clone)]
-pub struct TriangleChunk {
-    pub edge1: [__m256; 3],
-    pub edge2: [__m256; 3],
-    pub vert0: [__m256; 3],
-    pub inactive: __m256,
-}
-
-#[cfg(all(feature = "avx2", not(feature = "no-simd"), not(feature = "avx512")))]
-pub const MESH_CHUNK_SIZE: usize = 8;
-
-#[cfg(feature = "avx512")]
-#[derive(Debug, Clone)]
-pub struct MeshChunk {
-    pub edge1: [__m512; 3],
-    pub edge2: [__m512; 3],
-    pub vert0: [__m512; 3],
-    pub active: u16,
-}
-
-#[repr(align(64))]
-#[derive(Debug, Clone, Copy)]
-struct AlignedF32x16([f32; MESH_CHUNK_SIZE]);
-
-#[repr(align(64))]
-#[derive(Debug, Clone, Copy)]
-struct AlignedI32x16([i32; MESH_CHUNK_SIZE]);
-
-impl MeshChunk {
-    #[cfg(feature = "avx512")]
-    pub fn new(triangles: &[SimpleTriangle]) -> Self {
-        debug_assert!(triangles.len() <= MESH_CHUNK_SIZE);
-
-        let mut edge1 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
-        let mut edge2 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
-        let mut vert0 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
-        let mut active = 0;
-
-        for i in 0..triangles.len().min(MESH_CHUNK_SIZE) {
-            let e1 = triangles[i].vertices[1] - triangles[i].vertices[0];
-            let e2 = triangles[i].vertices[2] - triangles[i].vertices[0];
-            let v0 = triangles[i].vertices[0];
-
-            edge1[0].0[i] = e1.x;
-            edge1[1].0[i] = e1.y;
-            edge1[2].0[i] = e1.z;
-            edge2[0].0[i] = e2.x;
-            edge2[1].0[i] = e2.y;
-            edge2[2].0[i] = e2.z;
-            vert0[0].0[i] = v0.x;
-            vert0[1].0[i] = v0.y;
-            vert0[2].0[i] = v0.z;
-
-            active |= 1 << i;
-        }
-
-        unsafe {
-            Self {
-                edge1: [
-                    _mm512_load_ps(edge1[0].0.as_ptr()),
-                    _mm512_load_ps(edge1[1].0.as_ptr()),
-                    _mm512_load_ps(edge1[2].0.as_ptr()),
-                ],
-                edge2: [
-                    _mm512_load_ps(edge2[0].0.as_ptr()),
-                    _mm512_load_ps(edge2[1].0.as_ptr()),
-                    _mm512_load_ps(edge2[2].0.as_ptr()),
-                ],
-                vert0: [
-                    _mm512_load_ps(vert0[0].0.as_ptr()),
-                    _mm512_load_ps(vert0[1].0.as_ptr()),
-                    _mm512_load_ps(vert0[2].0.as_ptr()),
-                ],
-                active,
-            }
-        }
-    }
-
-    #[cfg(feature = "avx512")]
-    pub fn extract_triangle(&self, index: usize) -> SimpleTriangle {
-        let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-        let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-        let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-
-        unsafe {
-            _mm512_store_ps(edge1[0].0.as_mut_ptr(), self.edge1[0]);
-            _mm512_store_ps(edge1[1].0.as_mut_ptr(), self.edge1[1]);
-            _mm512_store_ps(edge1[2].0.as_mut_ptr(), self.edge1[2]);
-            _mm512_store_ps(edge2[0].0.as_mut_ptr(), self.edge2[0]);
-            _mm512_store_ps(edge2[1].0.as_mut_ptr(), self.edge2[1]);
-            _mm512_store_ps(edge2[2].0.as_mut_ptr(), self.edge2[2]);
-            _mm512_store_ps(vert0[0].0.as_mut_ptr(), self.vert0[0]);
-            _mm512_store_ps(vert0[1].0.as_mut_ptr(), self.vert0[1]);
-            _mm512_store_ps(vert0[2].0.as_mut_ptr(), self.vert0[2]);
-        }
-
-        SimpleTriangle {
-            vertices: [
-                Vec3::new(vert0[0].0[index], vert0[1].0[index], vert0[2].0[index]),
-                Vec3::new(
-                    vert0[0].0[index] + edge1[0].0[index],
-                    vert0[1].0[index] + edge1[1].0[index],
-                    vert0[2].0[index] + edge1[2].0[index],
-                ),
-                Vec3::new(
-                    vert0[0].0[index] + edge2[0].0[index],
-                    vert0[1].0[index] + edge2[1].0[index],
-                    vert0[2].0[index] + edge2[2].0[index],
-                ),
-            ],
-        }
-    }
-}
-
-#[cfg(feature = "avx512")]
-impl BoundedGeometry for MeshChunk {
-    fn local_bounding_box(&self) -> AABB {
-        let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-        let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-        let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-
-        unsafe {
-            _mm512_store_ps(edge1[0].0.as_mut_ptr(), self.edge1[0]);
-            _mm512_store_ps(edge1[1].0.as_mut_ptr(), self.edge1[1]);
-            _mm512_store_ps(edge1[2].0.as_mut_ptr(), self.edge1[2]);
-            _mm512_store_ps(edge2[0].0.as_mut_ptr(), self.edge2[0]);
-            _mm512_store_ps(edge2[1].0.as_mut_ptr(), self.edge2[1]);
-            _mm512_store_ps(edge2[2].0.as_mut_ptr(), self.edge2[2]);
-            _mm512_store_ps(vert0[0].0.as_mut_ptr(), self.vert0[0]);
-            _mm512_store_ps(vert0[1].0.as_mut_ptr(), self.vert0[1]);
-            _mm512_store_ps(vert0[2].0.as_mut_ptr(), self.vert0[2]);
-        }
-        let mut aabb = AABB::null();
-
-        for i in 0..MESH_CHUNK_SIZE {
-            if self.active & (1 << i) == 0 {
-                break;
-            }
-
-            let e1 = DVec3::new(
-                edge1[0].0[i] as f64,
-                edge1[1].0[i] as f64,
-                edge1[2].0[i] as f64,
-            );
-            let e2 = DVec3::new(
-                edge2[0].0[i] as f64,
-                edge2[1].0[i] as f64,
-                edge2[2].0[i] as f64,
-            );
-            let v0 = DVec3::new(
-                vert0[0].0[i] as f64,
-                vert0[1].0[i] as f64,
-                vert0[2].0[i] as f64,
-            );
-
-            let v1 = v0 + e1;
-            let v2 = v0 + e2;
-
-            aabb.contain_point(v0);
-            aabb.contain_point(v1);
-            aabb.contain_point(v2);
-        }
-
-        aabb
-    }
-
-    fn center_point(&self) -> DVec3 {
-        let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-        let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-        let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-
-        unsafe {
-            _mm512_store_ps(edge1[0].0.as_mut_ptr(), self.edge1[0]);
-            _mm512_store_ps(edge1[1].0.as_mut_ptr(), self.edge1[1]);
-            _mm512_store_ps(edge1[2].0.as_mut_ptr(), self.edge1[2]);
-            _mm512_store_ps(edge2[0].0.as_mut_ptr(), self.edge2[0]);
-            _mm512_store_ps(edge2[1].0.as_mut_ptr(), self.edge2[1]);
-            _mm512_store_ps(edge2[2].0.as_mut_ptr(), self.edge2[2]);
-            _mm512_store_ps(vert0[0].0.as_mut_ptr(), self.vert0[0]);
-            _mm512_store_ps(vert0[1].0.as_mut_ptr(), self.vert0[1]);
-            _mm512_store_ps(vert0[2].0.as_mut_ptr(), self.vert0[2]);
-        }
-
-        let mut point = DVec3::zero();
-        let mut count = 0;
-
-        for i in 0..MESH_CHUNK_SIZE {
-            if self.active & (1 << i) == 0 {
-                break;
-            }
-
-            let e1 = DVec3::new(
-                edge1[0].0[i] as f64,
-                edge1[1].0[i] as f64,
-                edge1[2].0[i] as f64,
-            );
-            let e2 = DVec3::new(
-                edge2[0].0[i] as f64,
-                edge2[1].0[i] as f64,
-                edge2[2].0[i] as f64,
-            );
-            let v0 = DVec3::new(
-                vert0[0].0[i] as f64,
-                vert0[1].0[i] as f64,
-                vert0[2].0[i] as f64,
-            );
-
-            let v1 = v0 + e1;
-            let v2 = v0 + e2;
-
-            point += v0 + v1 + v2;
-            count += 3;
-        }
-
-        point / count as f64
-    }
-}
-
-#[cfg(feature = "avx512")]
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkIntersection {
     t: f32,     // distance to intersection, or undefined if no hit
     index: i32, // index of the triangle in the chunk, or -1 if no hit
 }
-
-#[cfg(feature = "avx512")]
-pub struct ChunkRay {
-    origin: [__m512; 3],
-    direction: [__m512; 3],
-}
-
-impl ChunkRay {
-    #[cfg(feature = "avx512")]
-    pub fn new(ray: Ray) -> Self {
-        unsafe {
-            let origin = [
-                _mm512_set1_ps(ray.origin.x as f32),
-                _mm512_set1_ps(ray.origin.y as f32),
-                _mm512_set1_ps(ray.origin.z as f32),
-            ];
-            let direction = [
-                _mm512_set1_ps(ray.direction.x as f32),
-                _mm512_set1_ps(ray.direction.y as f32),
-                _mm512_set1_ps(ray.direction.z as f32),
-            ];
-
-            Self { origin, direction }
-        }
-    }
-
-    #[cfg(feature = "avx512")]
-    #[target_feature(enable = "avx512f,avx512vl,bmi1")]
-    pub unsafe fn intersect_chunk(&self, chunk: &MeshChunk, max_t: f32) -> ChunkIntersection {
-        #[inline(always)]
-        unsafe fn avx512_cross(a: &[__m512; 3], b: &[__m512; 3]) -> [__m512; 3] {
-            [
-                _mm512_fmsub_ps(a[1], b[2], _mm512_mul_ps(b[1], a[2])),
-                _mm512_fmsub_ps(a[2], b[0], _mm512_mul_ps(b[2], a[0])),
-                _mm512_fmsub_ps(a[0], b[1], _mm512_mul_ps(b[0], a[1])),
-            ]
-        }
-
-        #[inline(always)]
-        unsafe fn avx512_dot(a: &[__m512; 3], b: &[__m512; 3]) -> __m512 {
-            _mm512_fmadd_ps(
-                a[2],
-                b[2],
-                _mm512_fmadd_ps(a[1], b[1], _mm512_mul_ps(a[0], b[0])),
-            )
-        }
-
-        #[inline(always)]
-        unsafe fn avx512_sub(a: &[__m512; 3], b: &[__m512; 3]) -> [__m512; 3] {
-            [
-                _mm512_sub_ps(a[0], b[0]),
-                _mm512_sub_ps(a[1], b[1]),
-                _mm512_sub_ps(a[2], b[2]),
-            ]
-        }
-
-        const EPS: f32 = 1e-6;
-
-        let q = avx512_cross(&self.direction, &chunk.edge2);
-        let a = avx512_dot(&chunk.edge1, &q);
-        let f = _mm512_div_ps(_mm512_set1_ps(1.0), a);
-        let s = avx512_sub(&self.origin, &chunk.vert0);
-        let r = avx512_cross(&s, &chunk.edge1);
-
-        let u = _mm512_mul_ps(avx512_dot(&s, &q), f);
-        let v = _mm512_mul_ps(avx512_dot(&self.direction, &r), f);
-        let t = _mm512_mul_ps(avx512_dot(&chunk.edge2, &r), f);
-
-        // t > 0
-        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NLE_UQ>(chunk.active, t, _mm512_set1_ps(EPS));
-
-        // t < max_t
-        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NGE_UQ>(mask, t, _mm512_set1_ps(max_t));
-
-        // u >= 0
-        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NLT_UQ>(mask, u, _mm512_set1_ps(0.0));
-
-        // u <= 1
-        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NGT_UQ>(mask, u, _mm512_set1_ps(1.0));
-
-        // v >= 0
-        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NLT_UQ>(mask, v, _mm512_set1_ps(0.0));
-
-        // u + v <= 1
-        let mask =
-            _mm512_mask_cmp_ps_mask::<_CMP_NGT_UQ>(mask, _mm512_add_ps(u, v), _mm512_set1_ps(1.0));
-
-        // llvm doing a funny
-        // `mask` is *not* a u16, its an __mmask16 and intellisense
-        // has just been gaslighting me this whole time
-        // every time i access the mask, it generates a vextractf instruction
-
-        // so instead, mask out the invalid t values (set them to inf),
-        // then use reduce_min to find the smallest t value, compare that
-        // against the original t values to get a mask of which t value it is,
-        // then ACTUALLY convert it to a u16 with mask2int, and count the
-        // trailing bits to get the index of the triangle that was hit
-        let t = _mm512_mask_blend_ps(mask, _mm512_set1_ps(f32::INFINITY), t);
-        let tmin = _mm512_reduce_min_ps(t);
-        let tmask = _mm512_cmpeq_ps_mask(t, _mm512_set1_ps(tmin));
-        let index = _mm512_mask2int(tmask);
-
-        // oh and theres this, fucker produces a branch to
-        // "fix" the case where the input value is 0.
-        // let index = index.trailing_zeros();
-
-        let index = _mm_tzcnt_32(index as u32);
-
-        ChunkIntersection {
-            t: tmin,
-            index: index as i32,
-        }
-    }
-}
-
-#[cfg(feature = "avx512")]
-pub const MESH_CHUNK_SIZE: usize = 16;
 
 #[derive(Debug, Clone)]
 struct OrderedTriangle {
@@ -391,6 +45,59 @@ struct OrderedTriangle {
 
     /// Morton code of the triangle
     pub code: u32,
+}
+
+#[cfg(feature = "no-simd")]
+pub struct ChunkRay {
+    origin: Vec3,
+    direction: Vec3,
+}
+
+#[cfg(feature = "no-simd")]
+#[derive(Debug, Clone)]
+pub struct MeshChunk {
+    pub edge1: Vec3,
+    pub edge2: Vec3,
+    pub vert0: Vec3,
+}
+
+#[cfg(feature = "no-simd")]
+pub const MESH_CHUNK_SIZE: usize = 8;
+
+#[cfg(all(feature = "avx2", not(feature = "no-simd"), not(feature = "avx512")))]
+pub const MESH_CHUNK_SIZE: usize = 8;
+
+#[cfg(feature = "avx512")]
+pub const MESH_CHUNK_SIZE: usize = 16;
+
+#[cfg(all(feature = "avx2", not(feature = "no-simd"), not(feature = "avx512")))]
+pub struct ChunkRay {
+    origin: [__m256; 3],
+    direction: [__m256; 3],
+}
+
+#[cfg(all(feature = "avx2", not(feature = "no-simd"), not(feature = "avx512")))]
+#[derive(Debug, Clone)]
+pub struct MeshChunk {
+    pub edge1: [__m256; 3],
+    pub edge2: [__m256; 3],
+    pub vert0: [__m256; 3],
+    pub active: u8,
+}
+
+#[cfg(feature = "avx512")]
+pub struct ChunkRay {
+    origin: [__m512; 3],
+    direction: [__m512; 3],
+}
+
+#[cfg(feature = "avx512")]
+#[derive(Debug, Clone)]
+pub struct MeshChunk {
+    pub edge1: [__m512; 3],
+    pub edge2: [__m512; 3],
+    pub vert0: [__m512; 3],
+    pub active: u16,
 }
 
 // TODO:
@@ -802,7 +509,7 @@ impl Mesh {
         } else if MESH_CHUNK_SIZE == 8 || MESH_CHUNK_SIZE == 16 {
             let clustering = SpatialClustering::new_bvh(triangles.iter().map(|tri| tri.vertices));
 
-            println!("clustering into {} chunks", clustering.chunks.len());
+            // println!("clustering into {} chunks", clustering.chunks.len());
 
             for chunk in clustering.chunks.iter() {
                 for tri in chunk {
@@ -823,7 +530,7 @@ impl Mesh {
             unreachable!();
         }
 
-        println!("building bvh from clusters");
+        // println!("building bvh from clusters");
         let bvh = BVH::build(&mesh_chunks);
 
         Self {
@@ -864,14 +571,11 @@ impl RaytracableGeometry for Mesh {
         let mut chunk_id = -1i32; // id of mesh chunk intersected
         let mut chunk_inner_id = -1i32; // id of triangle in chunk intersected
 
-        let mut nodes_visited = 0;
         let mut nodes_intersected = 0;
         let mut primitives_intersected = 0;
 
         while stack_ptr > 0 {
             debug_assert!(stack_ptr < stack.len());
-
-            nodes_visited += 1;
 
             stack_ptr -= 1;
             let node_id = unsafe { stack.get_unchecked(stack_ptr) };
@@ -968,6 +672,305 @@ impl RaytracableGeometry for Mesh {
                 nodes_intersected,
                 primitives_intersected,
             })
+        }
+    }
+}
+
+#[cfg(feature = "avx512")]
+impl MeshChunk {
+    pub fn new(triangles: &[SimpleTriangle]) -> Self {
+        use crate::utils::alignedmem::AlignedF32x16;
+
+        debug_assert!(triangles.len() <= MESH_CHUNK_SIZE);
+
+        let mut edge1 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
+        let mut edge2 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
+        let mut vert0 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
+        let mut active = 0;
+
+        for i in 0..triangles.len().min(MESH_CHUNK_SIZE) {
+            let e1 = triangles[i].vertices[1] - triangles[i].vertices[0];
+            let e2 = triangles[i].vertices[2] - triangles[i].vertices[0];
+            let v0 = triangles[i].vertices[0];
+
+            edge1[0].0[i] = e1.x;
+            edge1[1].0[i] = e1.y;
+            edge1[2].0[i] = e1.z;
+            edge2[0].0[i] = e2.x;
+            edge2[1].0[i] = e2.y;
+            edge2[2].0[i] = e2.z;
+            vert0[0].0[i] = v0.x;
+            vert0[1].0[i] = v0.y;
+            vert0[2].0[i] = v0.z;
+
+            active |= 1 << i;
+        }
+
+        unsafe {
+            Self {
+                edge1: [
+                    _mm512_load_ps(edge1[0].0.as_ptr()),
+                    _mm512_load_ps(edge1[1].0.as_ptr()),
+                    _mm512_load_ps(edge1[2].0.as_ptr()),
+                ],
+                edge2: [
+                    _mm512_load_ps(edge2[0].0.as_ptr()),
+                    _mm512_load_ps(edge2[1].0.as_ptr()),
+                    _mm512_load_ps(edge2[2].0.as_ptr()),
+                ],
+                vert0: [
+                    _mm512_load_ps(vert0[0].0.as_ptr()),
+                    _mm512_load_ps(vert0[1].0.as_ptr()),
+                    _mm512_load_ps(vert0[2].0.as_ptr()),
+                ],
+                active,
+            }
+        }
+    }
+
+    #[cfg(feature = "avx512")]
+    pub fn extract_triangle(&self, index: usize) -> SimpleTriangle {
+        let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+
+        unsafe {
+            _mm512_store_ps(edge1[0].0.as_mut_ptr(), self.edge1[0]);
+            _mm512_store_ps(edge1[1].0.as_mut_ptr(), self.edge1[1]);
+            _mm512_store_ps(edge1[2].0.as_mut_ptr(), self.edge1[2]);
+            _mm512_store_ps(edge2[0].0.as_mut_ptr(), self.edge2[0]);
+            _mm512_store_ps(edge2[1].0.as_mut_ptr(), self.edge2[1]);
+            _mm512_store_ps(edge2[2].0.as_mut_ptr(), self.edge2[2]);
+            _mm512_store_ps(vert0[0].0.as_mut_ptr(), self.vert0[0]);
+            _mm512_store_ps(vert0[1].0.as_mut_ptr(), self.vert0[1]);
+            _mm512_store_ps(vert0[2].0.as_mut_ptr(), self.vert0[2]);
+        }
+
+        SimpleTriangle {
+            vertices: [
+                Vec3::new(vert0[0].0[index], vert0[1].0[index], vert0[2].0[index]),
+                Vec3::new(
+                    vert0[0].0[index] + edge1[0].0[index],
+                    vert0[1].0[index] + edge1[1].0[index],
+                    vert0[2].0[index] + edge1[2].0[index],
+                ),
+                Vec3::new(
+                    vert0[0].0[index] + edge2[0].0[index],
+                    vert0[1].0[index] + edge2[1].0[index],
+                    vert0[2].0[index] + edge2[2].0[index],
+                ),
+            ],
+        }
+    }
+}
+
+#[cfg(feature = "avx512")]
+impl BoundedGeometry for MeshChunk {
+    fn local_bounding_box(&self) -> AABB {
+        let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+
+        unsafe {
+            _mm512_store_ps(edge1[0].0.as_mut_ptr(), self.edge1[0]);
+            _mm512_store_ps(edge1[1].0.as_mut_ptr(), self.edge1[1]);
+            _mm512_store_ps(edge1[2].0.as_mut_ptr(), self.edge1[2]);
+            _mm512_store_ps(edge2[0].0.as_mut_ptr(), self.edge2[0]);
+            _mm512_store_ps(edge2[1].0.as_mut_ptr(), self.edge2[1]);
+            _mm512_store_ps(edge2[2].0.as_mut_ptr(), self.edge2[2]);
+            _mm512_store_ps(vert0[0].0.as_mut_ptr(), self.vert0[0]);
+            _mm512_store_ps(vert0[1].0.as_mut_ptr(), self.vert0[1]);
+            _mm512_store_ps(vert0[2].0.as_mut_ptr(), self.vert0[2]);
+        }
+        let mut aabb = AABB::null();
+
+        for i in 0..MESH_CHUNK_SIZE {
+            if self.active & (1 << i) == 0 {
+                break;
+            }
+
+            let e1 = DVec3::new(
+                edge1[0].0[i] as f64,
+                edge1[1].0[i] as f64,
+                edge1[2].0[i] as f64,
+            );
+            let e2 = DVec3::new(
+                edge2[0].0[i] as f64,
+                edge2[1].0[i] as f64,
+                edge2[2].0[i] as f64,
+            );
+            let v0 = DVec3::new(
+                vert0[0].0[i] as f64,
+                vert0[1].0[i] as f64,
+                vert0[2].0[i] as f64,
+            );
+
+            let v1 = v0 + e1;
+            let v2 = v0 + e2;
+
+            aabb.contain_point(v0);
+            aabb.contain_point(v1);
+            aabb.contain_point(v2);
+        }
+
+        aabb
+    }
+
+    fn center_point(&self) -> DVec3 {
+        let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+
+        unsafe {
+            _mm512_store_ps(edge1[0].0.as_mut_ptr(), self.edge1[0]);
+            _mm512_store_ps(edge1[1].0.as_mut_ptr(), self.edge1[1]);
+            _mm512_store_ps(edge1[2].0.as_mut_ptr(), self.edge1[2]);
+            _mm512_store_ps(edge2[0].0.as_mut_ptr(), self.edge2[0]);
+            _mm512_store_ps(edge2[1].0.as_mut_ptr(), self.edge2[1]);
+            _mm512_store_ps(edge2[2].0.as_mut_ptr(), self.edge2[2]);
+            _mm512_store_ps(vert0[0].0.as_mut_ptr(), self.vert0[0]);
+            _mm512_store_ps(vert0[1].0.as_mut_ptr(), self.vert0[1]);
+            _mm512_store_ps(vert0[2].0.as_mut_ptr(), self.vert0[2]);
+        }
+
+        let mut point = DVec3::zero();
+        let mut count = 0;
+
+        for i in 0..MESH_CHUNK_SIZE {
+            if self.active & (1 << i) == 0 {
+                break;
+            }
+
+            let e1 = DVec3::new(
+                edge1[0].0[i] as f64,
+                edge1[1].0[i] as f64,
+                edge1[2].0[i] as f64,
+            );
+            let e2 = DVec3::new(
+                edge2[0].0[i] as f64,
+                edge2[1].0[i] as f64,
+                edge2[2].0[i] as f64,
+            );
+            let v0 = DVec3::new(
+                vert0[0].0[i] as f64,
+                vert0[1].0[i] as f64,
+                vert0[2].0[i] as f64,
+            );
+
+            let v1 = v0 + e1;
+            let v2 = v0 + e2;
+
+            point += v0 + v1 + v2;
+            count += 3;
+        }
+
+        point / count as f64
+    }
+}
+
+#[cfg(feature = "avx512")]
+impl ChunkRay {
+    pub fn new(ray: Ray) -> Self {
+        unsafe {
+            let origin = [
+                _mm512_set1_ps(ray.origin.x as f32),
+                _mm512_set1_ps(ray.origin.y as f32),
+                _mm512_set1_ps(ray.origin.z as f32),
+            ];
+            let direction = [
+                _mm512_set1_ps(ray.direction.x as f32),
+                _mm512_set1_ps(ray.direction.y as f32),
+                _mm512_set1_ps(ray.direction.z as f32),
+            ];
+
+            Self { origin, direction }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512vl,bmi1")]
+    pub unsafe fn intersect_chunk(&self, chunk: &MeshChunk, max_t: f32) -> ChunkIntersection {
+        #[inline(always)]
+        unsafe fn avx512_cross(a: &[__m512; 3], b: &[__m512; 3]) -> [__m512; 3] {
+            [
+                _mm512_fmsub_ps(a[1], b[2], _mm512_mul_ps(b[1], a[2])),
+                _mm512_fmsub_ps(a[2], b[0], _mm512_mul_ps(b[2], a[0])),
+                _mm512_fmsub_ps(a[0], b[1], _mm512_mul_ps(b[0], a[1])),
+            ]
+        }
+
+        #[inline(always)]
+        unsafe fn avx512_dot(a: &[__m512; 3], b: &[__m512; 3]) -> __m512 {
+            _mm512_fmadd_ps(
+                a[2],
+                b[2],
+                _mm512_fmadd_ps(a[1], b[1], _mm512_mul_ps(a[0], b[0])),
+            )
+        }
+
+        #[inline(always)]
+        unsafe fn avx512_sub(a: &[__m512; 3], b: &[__m512; 3]) -> [__m512; 3] {
+            [
+                _mm512_sub_ps(a[0], b[0]),
+                _mm512_sub_ps(a[1], b[1]),
+                _mm512_sub_ps(a[2], b[2]),
+            ]
+        }
+
+        const EPS: f32 = 1e-6;
+
+        let q = avx512_cross(&self.direction, &chunk.edge2);
+        let a = avx512_dot(&chunk.edge1, &q);
+        let f = _mm512_div_ps(_mm512_set1_ps(1.0), a);
+        let s = avx512_sub(&self.origin, &chunk.vert0);
+        let r = avx512_cross(&s, &chunk.edge1);
+
+        let u = _mm512_mul_ps(avx512_dot(&s, &q), f);
+        let v = _mm512_mul_ps(avx512_dot(&self.direction, &r), f);
+        let t = _mm512_mul_ps(avx512_dot(&chunk.edge2, &r), f);
+
+        // t > 0
+        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NLE_UQ>(chunk.active, t, _mm512_set1_ps(EPS));
+
+        // t < max_t
+        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NGE_UQ>(mask, t, _mm512_set1_ps(max_t));
+
+        // u >= 0
+        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NLT_UQ>(mask, u, _mm512_set1_ps(0.0));
+
+        // u <= 1
+        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NGT_UQ>(mask, u, _mm512_set1_ps(1.0));
+
+        // v >= 0
+        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NLT_UQ>(mask, v, _mm512_set1_ps(0.0));
+
+        // u + v <= 1
+        let mask =
+            _mm512_mask_cmp_ps_mask::<_CMP_NGT_UQ>(mask, _mm512_add_ps(u, v), _mm512_set1_ps(1.0));
+
+        // llvm doing a funny
+        // `mask` is *not* a u16, its an __mmask16 and intellisense
+        // has just been gaslighting me this whole time
+        // every time i access the mask, it generates a vextractf instruction
+
+        // so instead, mask out the invalid t values (set them to inf),
+        // then use reduce_min to find the smallest t value, compare that
+        // against the original t values to get a mask of which t value it is,
+        // then ACTUALLY convert it to a u16 with mask2int, and count the
+        // trailing bits to get the index of the triangle that was hit
+        let t = _mm512_mask_blend_ps(mask, _mm512_set1_ps(f32::INFINITY), t);
+        let tmin = _mm512_reduce_min_ps(t);
+        let tmask = _mm512_cmpeq_ps_mask(t, _mm512_set1_ps(tmin));
+        let index = _mm512_mask2int(tmask);
+
+        // oh and theres this, fucker produces a branch to
+        // "fix" the case where the input value is 0.
+        // let index = index.trailing_zeros();
+
+        let index = _mm_tzcnt_32(index as u32);
+
+        ChunkIntersection {
+            t: tmin,
+            index: index as i32,
         }
     }
 }

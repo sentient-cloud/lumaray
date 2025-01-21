@@ -10,7 +10,7 @@ use std::{fs::File, io::BufReader, time::Instant};
 use parsers::stl::STL;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use render::raytracable::{mesh::Mesh, RaytracableGeometry};
-use ultraviolet::{DVec3, Vec3};
+use ultraviolet::Vec3;
 
 #[cfg(all(feature = "no-simd", feature = "avx512"))]
 compile_error!("Cannot enable no-simd and avx512 features at the same time");
