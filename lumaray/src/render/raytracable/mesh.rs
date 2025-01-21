@@ -864,8 +864,14 @@ impl RaytracableGeometry for Mesh {
         let mut chunk_id = -1i32; // id of mesh chunk intersected
         let mut chunk_inner_id = -1i32; // id of triangle in chunk intersected
 
+        let mut nodes_visited = 0;
+        let mut nodes_intersected = 0;
+        let mut primitives_intersected = 0;
+
         while stack_ptr > 0 {
             debug_assert!(stack_ptr < stack.len());
+
+            nodes_visited += 1;
 
             stack_ptr -= 1;
             let node_id = unsafe { stack.get_unchecked(stack_ptr) };
@@ -878,6 +884,7 @@ impl RaytracableGeometry for Mesh {
             // println!("node.is_leaf {}", node.is_leaf());
 
             if !node.is_leaf() {
+                nodes_intersected += 1;
                 let isect = unsafe { node.child_volumes().test(&two_ray, max_t) };
 
                 match isect.state {
@@ -917,6 +924,7 @@ impl RaytracableGeometry for Mesh {
             } else {
                 debug_assert!(node.right >= 0 && node.right < self.chunks.len() as i32);
 
+                primitives_intersected += 1;
                 // println!("isect chunk {}", node.right);
 
                 let chunk = unsafe { self.chunks.get_unchecked(node.right as usize) };
@@ -957,6 +965,8 @@ impl RaytracableGeometry for Mesh {
                 ),
                 uvw: DVec3::zero(),
                 thick_intersection: None,
+                nodes_intersected,
+                primitives_intersected,
             })
         }
     }

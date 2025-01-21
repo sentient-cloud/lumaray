@@ -28,6 +28,12 @@ pub struct Intersection {
     /// For objects such as spheres, you can immediately calculate the 2nd intersection point,
     /// and then you don't waste time calculating everything again.
     pub thick_intersection: Option<(f64, DVec3, DVec3)>,
+
+    /// Number of nodes intersected, if applicable.
+    pub nodes_intersected: usize,
+
+    /// Number of primitives intersected, if applicable.
+    pub primitives_intersected: usize,
 }
 
 impl Intersection {
@@ -51,6 +57,8 @@ impl Intersection {
             normal,
             uvw,
             thick_intersection: None,
+            nodes_intersected: self.nodes_intersected,
+            primitives_intersected: self.primitives_intersected,
         }
     }
 }
@@ -81,6 +89,8 @@ pub trait RaytracableGeometry {
                     DVec3::new(0.0, 0.0, 0.0)
                 },
                 thick_intersection: None,
+                nodes_intersected: first_isect.nodes_intersected,
+                primitives_intersected: first_isect.primitives_intersected,
             });
         }
 

@@ -51,6 +51,8 @@ impl RaytracableGeometry for Sphere {
                 normal,
                 uvw,
                 thick_intersection: None,
+                nodes_intersected: 0,
+                primitives_intersected: 1,
             });
         }
 
@@ -83,6 +85,8 @@ impl RaytracableGeometry for Sphere {
             normal: normal1,
             uvw: uvw1,
             thick_intersection: Some((t2, normal2, uvw2)),
+            nodes_intersected: 0,
+            primitives_intersected: 1,
         })
     }
 

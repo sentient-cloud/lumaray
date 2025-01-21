@@ -123,6 +123,8 @@ pub struct BVHTraverseResult {
     pub primitive_id: i32,
     pub t: f64,
     pub nodes_visited: usize,
+    pub nodes_intersected: usize,
+    pub primitives_intersected: usize,
 }
 
 impl<T> BVH<T>
@@ -337,7 +339,7 @@ where
     where
         W: std::io::Write,
     {
-        writer.write_all(b"digraph G {\n")?;
+        writer.write_all("digraph G {\n".as_bytes())?;
 
         for (i, node) in self.nodes.iter().enumerate() {
             if node.is_leaf() {
@@ -352,7 +354,7 @@ where
             }
         }
 
-        writer.write_all(b"}")?;
+        writer.write_all("}".as_bytes())?;
 
         Ok(())
     }
@@ -366,6 +368,9 @@ where
         let two_ray = TwoRay::new(*ray);
 
         let mut nodes_visited = 0;
+        let mut nodes_intersected = 0;
+        let mut primitives_intersected = 0;
+
         let mut stack: [i32; 128] = [0; 128];
         let mut stack_ptr = 1;
 
@@ -385,6 +390,7 @@ where
             debug_assert!(primitives.len() > node.right as usize);
 
             if !node.is_leaf() {
+                nodes_intersected += 1;
                 let isect = unsafe { node.child_volumes().test(&two_ray, max_t) };
 
                 match isect.state {
@@ -424,6 +430,7 @@ where
             } else {
                 debug_assert!(node.right >= 0 && node.right < primitives.len() as i32);
 
+                primitives_intersected += 1;
                 let primitive = unsafe { primitives.get_unchecked(node.right as usize) };
 
                 if let Some(t) = primitive.thin_intersection(ray, max_t, false) {
@@ -441,6 +448,8 @@ where
             primitive_id,
             t: max_t,
             nodes_visited,
+            nodes_intersected,
+            primitives_intersected,
         }
     }
 }

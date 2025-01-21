@@ -42,7 +42,7 @@ fn main() {
 
     use crate::render::{raytracable::mesh::SimpleTriangle, Ray};
 
-    let model = "../data/models/Stanford_Dragon.stl";
+    let model = "../data/models/Asian_Dragon.stl";
     let mut bufreader = BufReader::new(File::open(model).unwrap());
     let stl = STL::new_from_bufreader(&mut bufreader).unwrap();
 
@@ -67,17 +67,26 @@ fn main() {
 
     let ray = Ray::new(DVec3::new(300.0, 0.0, 0.0), DVec3::new(-1.0, 0.0, 0.0));
 
-    let iters = 10_000_000usize;
+    let iters = 50_000_000usize;
     let threads = 32;
 
     let start = Instant::now();
 
-    (0..(iters * threads)).into_par_iter().for_each(|_| {
-        let isect = mesh.thin_intersection(&ray, f64::INFINITY, false);
-        core::hint::black_box(isect);
-    });
+    let (nodes_isect, primitives_isect) = (0..(iters * threads))
+        .into_par_iter()
+        .map(|_| {
+            let isect = mesh.thin_intersection(&ray, f64::INFINITY, false);
+            // assert!(isect.is_some());
+            isect
+                .map(|i| (i.nodes_intersected, i.primitives_intersected))
+                .unwrap_or((0, 0))
+        })
+        .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
 
     let elapsed = start.elapsed();
+
+    println!("Intersected {} nodes", nodes_isect);
+    println!("Intersected {} primitives", primitives_isect);
 
     println!("Took: {}us", elapsed.as_micros());
 
