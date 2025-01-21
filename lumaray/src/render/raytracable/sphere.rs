@@ -16,7 +16,7 @@ impl Sphere {
 }
 
 impl RaytracableGeometry for Sphere {
-    fn thin_intersection(&self, ray: &Ray, compute_uvw: bool) -> Option<Intersection> {
+    fn thin_intersection(&self, ray: &Ray, max_t: f64, compute_uvw: bool) -> Option<Intersection> {
         let oc = ray.origin - self.center;
         let a = ray.direction.mag_sq();
         let b = 2.0 * ray.direction.dot(oc);
@@ -38,6 +38,10 @@ impl RaytracableGeometry for Sphere {
 
         // near point is behind us, but far point is in front of us
         if t1 < 0.0 {
+            if t2 > max_t {
+                return None;
+            }
+
             let intersection_point = ray.at(t2);
             let normal = (intersection_point - self.center).normalized();
             let uvw = DVec3::new(0.0, 0.0, 0.0);
@@ -48,6 +52,10 @@ impl RaytracableGeometry for Sphere {
                 uvw,
                 thick_intersection: None,
             });
+        }
+
+        if t1 > max_t {
+            return None;
         }
 
         // both points are in front of us

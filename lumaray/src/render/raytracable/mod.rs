@@ -7,7 +7,7 @@ pub mod sphere;
 #[allow(unused_imports)]
 pub(crate) use sphere::Sphere;
 
-use super::{Ray, AABB};
+use super::{math::EPS, Ray, AABB};
 
 #[derive(Debug, Copy, Clone)]
 pub struct Intersection {
@@ -57,7 +57,7 @@ impl Intersection {
 
 pub trait RaytracableGeometry {
     /// Checks for a thin intersection with the object.
-    fn thin_intersection(&self, ray: &Ray, compute_uvw: bool) -> Option<Intersection>;
+    fn thin_intersection(&self, ray: &Ray, max_t: f64, compute_uvw: bool) -> Option<Intersection>;
 
     /// Checks for a "thick" intersection with the object.
     ///
@@ -67,6 +67,7 @@ pub trait RaytracableGeometry {
     fn thicc_intersection(
         &self,
         first_isect: &Intersection,
+        max_t: f64,
         compute_uvw: bool,
     ) -> Option<Intersection> {
         if let Some((t, normal, uvw)) = first_isect.thick_intersection {
@@ -85,6 +86,7 @@ pub trait RaytracableGeometry {
 
         self.thin_intersection(
             &Ray::new(first_isect.ray.at(first_isect.t), first_isect.ray.direction).eps_adjust(),
+            max_t - first_isect.t - EPS,
             compute_uvw,
         )
     }

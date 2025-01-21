@@ -4,12 +4,20 @@ pub fn hi() {
 
 use std::arch::x86_64::*;
 
-use crate::render::{Ray, AABB};
+use ultraviolet::DVec3;
+
+use crate::{
+    render::{Ray, AABB},
+    utils::constconstrain,
+};
 
 use super::TwoVolumeTest;
 
 #[repr(align(16))]
 struct AlignedF64x4([f64; 4]);
+
+#[repr(align(64))]
+struct AlignedF64x16([f64; 16]);
 
 pub struct TwoRay {
     pub origin: __m512d,
@@ -133,5 +141,49 @@ impl TwoVolume {
             right_t1: *tnears.add(1),
             right_t2: *tfars.add(1),
         }
+    }
+
+    /// Extracts the AABB at index `I` from the TwoVolume.
+    ///
+    /// I = 0 extracts the left AABB, I = 1 extracts the right AABB.
+    pub fn extract_aabb<const I: usize>(&self) -> AABB
+    where
+        [(); constconstrain::is_zero_or_one(I) - 1]:,
+    {
+        if I == 0 {
+            let mut mins = AlignedF64x16([0.0; 16]);
+            let mut maxs = AlignedF64x16([0.0; 16]);
+
+            unsafe {
+                _mm512_store_pd(mins.0.as_mut_ptr(), self.min);
+                _mm512_store_pd(maxs.0.as_mut_ptr(), self.max);
+
+                AABB {
+                    min: DVec3::new(mins.0[3], mins.0[5], mins.0[7]),
+                    max: DVec3::new(maxs.0[3], maxs.0[5], maxs.0[7]),
+                }
+            }
+        } else if I == 1 {
+            let mut mins = AlignedF64x16([0.0; 16]);
+            let mut maxs = AlignedF64x16([0.0; 16]);
+
+            unsafe {
+                _mm512_store_pd(mins.0.as_mut_ptr(), self.min);
+                _mm512_store_pd(maxs.0.as_mut_ptr(), self.max);
+
+                AABB {
+                    min: DVec3::new(mins.0[2], mins.0[4], mins.0[6]),
+                    max: DVec3::new(maxs.0[2], maxs.0[4], maxs.0[6]),
+                }
+            }
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+impl Into<(AABB, AABB)> for TwoVolume {
+    fn into(self) -> (AABB, AABB) {
+        (self.extract_aabb::<0>(), self.extract_aabb::<1>())
     }
 }

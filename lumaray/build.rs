@@ -37,6 +37,7 @@ fn main() {
         target_features.push("+avx512f");
         target_features.push("+avx512vl");
         target_features.push("+avx512dq");
+        target_features.push("+bmi1");
     }
 
     rustflags.push_str(" -C target-feature=");

@@ -1,3 +1,14 @@
+//! A mesh implementation.
+//!
+//! Meshes are basically triangle soup, but they also have normals and uvws.
+//!
+//! The mesh contains its own BVH based off of chunks of the mesh, which are
+//! sized to fit into AVX2 or AVX512 registers. Optionally you can disable
+//! simd entirely, in which case each chunk will contain only one triangle.
+//!
+//! Furthermore the BVH is specialized for meshes, because the underlying
+//! `MeshChunk` type does not implement `RaytracableGeometry`.
+
 use rayon::prelude::*;
 use rayon::slice::ParallelSlice;
 
@@ -8,8 +19,13 @@ use std::arch::x86_64::*;
 
 use crate::render::AABB;
 
+use super::{
+    bvh::{TwoRay, BVH},
+    BoundedGeometry, Intersection, Ray, RaytracableGeometry,
+};
+
 #[derive(Debug, Clone)]
-pub struct Triangle {
+pub struct SimpleTriangle {
     pub vertices: [Vec3; 3],
 }
 
@@ -40,22 +56,26 @@ pub struct MeshChunk {
     pub edge1: [__m512; 3],
     pub edge2: [__m512; 3],
     pub vert0: [__m512; 3],
-    pub inactive: __m512,
+    pub active: u16,
 }
+
+#[repr(align(64))]
+#[derive(Debug, Clone, Copy)]
+struct AlignedF32x16([f32; MESH_CHUNK_SIZE]);
+
+#[repr(align(64))]
+#[derive(Debug, Clone, Copy)]
+struct AlignedI32x16([i32; MESH_CHUNK_SIZE]);
 
 impl MeshChunk {
     #[cfg(feature = "avx512")]
-    pub fn new(triangles: &[Triangle]) -> Self {
-        debug_assert!(triangles.len() > MESH_CHUNK_SIZE);
+    pub fn new(triangles: &[SimpleTriangle]) -> Self {
+        debug_assert!(triangles.len() <= MESH_CHUNK_SIZE);
 
-        #[repr(align(64))]
-        #[derive(Clone, Copy)]
-        struct AlignedF32x16([f32; MESH_CHUNK_SIZE]);
-
-        let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-        let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-        let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
-        let mut inactive = [1.0; MESH_CHUNK_SIZE];
+        let mut edge1 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
+        let mut edge2 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
+        let mut vert0 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
+        let mut active = 0;
 
         for i in 0..triangles.len().min(MESH_CHUNK_SIZE) {
             let e1 = triangles[i].vertices[1] - triangles[i].vertices[0];
@@ -71,7 +91,8 @@ impl MeshChunk {
             vert0[0].0[i] = v0.x;
             vert0[1].0[i] = v0.y;
             vert0[2].0[i] = v0.z;
-            inactive[i] = 0.0;
+
+            active |= 1 << i;
         }
 
         unsafe {
@@ -91,8 +112,268 @@ impl MeshChunk {
                     _mm512_load_ps(vert0[1].0.as_ptr()),
                     _mm512_load_ps(vert0[2].0.as_ptr()),
                 ],
-                inactive: _mm512_load_ps(inactive.as_ptr()),
+                active,
             }
+        }
+    }
+
+    #[cfg(feature = "avx512")]
+    pub fn extract_triangle(&self, index: usize) -> SimpleTriangle {
+        let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+
+        unsafe {
+            _mm512_store_ps(edge1[0].0.as_mut_ptr(), self.edge1[0]);
+            _mm512_store_ps(edge1[1].0.as_mut_ptr(), self.edge1[1]);
+            _mm512_store_ps(edge1[2].0.as_mut_ptr(), self.edge1[2]);
+            _mm512_store_ps(edge2[0].0.as_mut_ptr(), self.edge2[0]);
+            _mm512_store_ps(edge2[1].0.as_mut_ptr(), self.edge2[1]);
+            _mm512_store_ps(edge2[2].0.as_mut_ptr(), self.edge2[2]);
+            _mm512_store_ps(vert0[0].0.as_mut_ptr(), self.vert0[0]);
+            _mm512_store_ps(vert0[1].0.as_mut_ptr(), self.vert0[1]);
+            _mm512_store_ps(vert0[2].0.as_mut_ptr(), self.vert0[2]);
+        }
+
+        SimpleTriangle {
+            vertices: [
+                Vec3::new(vert0[0].0[index], vert0[1].0[index], vert0[2].0[index]),
+                Vec3::new(
+                    vert0[0].0[index] + edge1[0].0[index],
+                    vert0[1].0[index] + edge1[1].0[index],
+                    vert0[2].0[index] + edge1[2].0[index],
+                ),
+                Vec3::new(
+                    vert0[0].0[index] + edge2[0].0[index],
+                    vert0[1].0[index] + edge2[1].0[index],
+                    vert0[2].0[index] + edge2[2].0[index],
+                ),
+            ],
+        }
+    }
+}
+
+#[cfg(feature = "avx512")]
+impl BoundedGeometry for MeshChunk {
+    fn local_bounding_box(&self) -> AABB {
+        let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+
+        unsafe {
+            _mm512_store_ps(edge1[0].0.as_mut_ptr(), self.edge1[0]);
+            _mm512_store_ps(edge1[1].0.as_mut_ptr(), self.edge1[1]);
+            _mm512_store_ps(edge1[2].0.as_mut_ptr(), self.edge1[2]);
+            _mm512_store_ps(edge2[0].0.as_mut_ptr(), self.edge2[0]);
+            _mm512_store_ps(edge2[1].0.as_mut_ptr(), self.edge2[1]);
+            _mm512_store_ps(edge2[2].0.as_mut_ptr(), self.edge2[2]);
+            _mm512_store_ps(vert0[0].0.as_mut_ptr(), self.vert0[0]);
+            _mm512_store_ps(vert0[1].0.as_mut_ptr(), self.vert0[1]);
+            _mm512_store_ps(vert0[2].0.as_mut_ptr(), self.vert0[2]);
+        }
+        let mut aabb = AABB::null();
+
+        for i in 0..MESH_CHUNK_SIZE {
+            if self.active & (1 << i) == 0 {
+                break;
+            }
+
+            let e1 = DVec3::new(
+                edge1[0].0[i] as f64,
+                edge1[1].0[i] as f64,
+                edge1[2].0[i] as f64,
+            );
+            let e2 = DVec3::new(
+                edge2[0].0[i] as f64,
+                edge2[1].0[i] as f64,
+                edge2[2].0[i] as f64,
+            );
+            let v0 = DVec3::new(
+                vert0[0].0[i] as f64,
+                vert0[1].0[i] as f64,
+                vert0[2].0[i] as f64,
+            );
+
+            let v1 = v0 + e1;
+            let v2 = v0 + e2;
+
+            aabb.contain_point(v0);
+            aabb.contain_point(v1);
+            aabb.contain_point(v2);
+        }
+
+        aabb
+    }
+
+    fn center_point(&self) -> DVec3 {
+        let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+        let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
+
+        unsafe {
+            _mm512_store_ps(edge1[0].0.as_mut_ptr(), self.edge1[0]);
+            _mm512_store_ps(edge1[1].0.as_mut_ptr(), self.edge1[1]);
+            _mm512_store_ps(edge1[2].0.as_mut_ptr(), self.edge1[2]);
+            _mm512_store_ps(edge2[0].0.as_mut_ptr(), self.edge2[0]);
+            _mm512_store_ps(edge2[1].0.as_mut_ptr(), self.edge2[1]);
+            _mm512_store_ps(edge2[2].0.as_mut_ptr(), self.edge2[2]);
+            _mm512_store_ps(vert0[0].0.as_mut_ptr(), self.vert0[0]);
+            _mm512_store_ps(vert0[1].0.as_mut_ptr(), self.vert0[1]);
+            _mm512_store_ps(vert0[2].0.as_mut_ptr(), self.vert0[2]);
+        }
+
+        let mut point = DVec3::zero();
+        let mut count = 0;
+
+        for i in 0..MESH_CHUNK_SIZE {
+            if self.active & (1 << i) == 0 {
+                break;
+            }
+
+            let e1 = DVec3::new(
+                edge1[0].0[i] as f64,
+                edge1[1].0[i] as f64,
+                edge1[2].0[i] as f64,
+            );
+            let e2 = DVec3::new(
+                edge2[0].0[i] as f64,
+                edge2[1].0[i] as f64,
+                edge2[2].0[i] as f64,
+            );
+            let v0 = DVec3::new(
+                vert0[0].0[i] as f64,
+                vert0[1].0[i] as f64,
+                vert0[2].0[i] as f64,
+            );
+
+            let v1 = v0 + e1;
+            let v2 = v0 + e2;
+
+            point += v0 + v1 + v2;
+            count += 3;
+        }
+
+        point / count as f64
+    }
+}
+
+#[cfg(feature = "avx512")]
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkIntersection {
+    t: f32,     // distance to intersection, or undefined if no hit
+    index: i32, // index of the triangle in the chunk, or -1 if no hit
+}
+
+#[cfg(feature = "avx512")]
+pub struct ChunkRay {
+    origin: [__m512; 3],
+    direction: [__m512; 3],
+}
+
+impl ChunkRay {
+    #[cfg(feature = "avx512")]
+    pub fn new(ray: Ray) -> Self {
+        unsafe {
+            let origin = [
+                _mm512_set1_ps(ray.origin.x as f32),
+                _mm512_set1_ps(ray.origin.y as f32),
+                _mm512_set1_ps(ray.origin.z as f32),
+            ];
+            let direction = [
+                _mm512_set1_ps(ray.direction.x as f32),
+                _mm512_set1_ps(ray.direction.y as f32),
+                _mm512_set1_ps(ray.direction.z as f32),
+            ];
+
+            Self { origin, direction }
+        }
+    }
+
+    #[cfg(feature = "avx512")]
+    #[target_feature(enable = "avx512f,avx512vl,bmi1")]
+    pub unsafe fn intersect_chunk(&self, chunk: &MeshChunk, max_t: f32) -> ChunkIntersection {
+        #[inline(always)]
+        unsafe fn avx512_cross(a: &[__m512; 3], b: &[__m512; 3]) -> [__m512; 3] {
+            [
+                _mm512_fmsub_ps(a[1], b[2], _mm512_mul_ps(b[1], a[2])),
+                _mm512_fmsub_ps(a[2], b[0], _mm512_mul_ps(b[2], a[0])),
+                _mm512_fmsub_ps(a[0], b[1], _mm512_mul_ps(b[0], a[1])),
+            ]
+        }
+
+        #[inline(always)]
+        unsafe fn avx512_dot(a: &[__m512; 3], b: &[__m512; 3]) -> __m512 {
+            _mm512_fmadd_ps(
+                a[2],
+                b[2],
+                _mm512_fmadd_ps(a[1], b[1], _mm512_mul_ps(a[0], b[0])),
+            )
+        }
+
+        #[inline(always)]
+        unsafe fn avx512_sub(a: &[__m512; 3], b: &[__m512; 3]) -> [__m512; 3] {
+            [
+                _mm512_sub_ps(a[0], b[0]),
+                _mm512_sub_ps(a[1], b[1]),
+                _mm512_sub_ps(a[2], b[2]),
+            ]
+        }
+
+        const EPS: f32 = 1e-6;
+
+        let q = avx512_cross(&self.direction, &chunk.edge2);
+        let a = avx512_dot(&chunk.edge1, &q);
+        let f = _mm512_div_ps(_mm512_set1_ps(1.0), a);
+        let s = avx512_sub(&self.origin, &chunk.vert0);
+        let r = avx512_cross(&s, &chunk.edge1);
+
+        let u = _mm512_mul_ps(avx512_dot(&s, &q), f);
+        let v = _mm512_mul_ps(avx512_dot(&self.direction, &r), f);
+        let t = _mm512_mul_ps(avx512_dot(&chunk.edge2, &r), f);
+
+        // t > 0
+        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NLE_UQ>(chunk.active, t, _mm512_set1_ps(EPS));
+
+        // t < max_t
+        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NGE_UQ>(mask, t, _mm512_set1_ps(max_t));
+
+        // u >= 0
+        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NLT_UQ>(mask, u, _mm512_set1_ps(0.0));
+
+        // u <= 1
+        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NGT_UQ>(mask, u, _mm512_set1_ps(1.0));
+
+        // v >= 0
+        let mask = _mm512_mask_cmp_ps_mask::<_CMP_NLT_UQ>(mask, v, _mm512_set1_ps(0.0));
+
+        // u + v <= 1
+        let mask =
+            _mm512_mask_cmp_ps_mask::<_CMP_NGT_UQ>(mask, _mm512_add_ps(u, v), _mm512_set1_ps(1.0));
+
+        // llvm doing a funny
+        // `mask` is *not* a u16, its an __mmask16 and intellisense
+        // has just been gaslighting me this whole time
+        // every time i access the mask, it generates a vextractf instruction
+
+        // so instead, mask out the invalid t values (set them to inf),
+        // then use reduce_min to find the smallest t value, compare that
+        // against the original t values to get a mask of which t value it is,
+        // then ACTUALLY convert it to a u16 with mask2int, and count the
+        // trailing bits to get the index of the triangle that was hit
+        let t = _mm512_mask_blend_ps(mask, _mm512_set1_ps(f32::INFINITY), t);
+        let tmin = _mm512_reduce_min_ps(t);
+        let tmask = _mm512_cmpeq_ps_mask(t, _mm512_set1_ps(tmin));
+        let index = _mm512_mask2int(tmask);
+
+        // oh and theres this, fucker produces a branch to
+        // "fix" the case where the input value is 0.
+        // let index = index.trailing_zeros();
+
+        let index = _mm_tzcnt_32(index as u32);
+
+        ChunkIntersection {
+            t: tmin,
+            index: index as i32,
         }
     }
 }
@@ -112,6 +393,8 @@ struct OrderedTriangle {
     pub code: u32,
 }
 
+// TODO:
+// keep the bvh from new_bvh
 #[derive(Debug)]
 struct SpatialClustering {
     pub chunks: Vec<Vec<OrderedTriangle>>,
@@ -336,14 +619,13 @@ impl SpatialClustering {
                     split_cluster(cluster)
                 };
 
-                #[cfg(debug_assertions)]
-                {
-                    let new_length = new_clusters
+                debug_assert_eq!(
+                    new_clusters
                         .iter()
                         .map(|c| c.triangles.len())
-                        .sum::<usize>();
-                    debug_assert_eq!(new_length, old_length);
-                }
+                        .sum::<usize>(),
+                    old_length
+                );
 
                 clusters.splice(cluster_to_split..=cluster_to_split, new_clusters);
             }
@@ -432,14 +714,7 @@ impl SpatialClustering {
                         }
                         bbox
                     })
-                    .reduce(
-                        || AABB::null(),
-                        |a, b| {
-                            let mut bbox = a;
-                            bbox.contain_aabb(&b);
-                            bbox
-                        },
-                    );
+                    .reduce(|| AABB::null(), |a, b| a.containing_aabb(&b));
             } else {
                 unsafe {
                     (left..right)
@@ -494,9 +769,197 @@ impl SpatialClustering {
 
 #[derive(Debug)]
 pub struct Mesh {
-    triangles: Vec<MeshChunk>,
+    chunks: Vec<MeshChunk>,
+    refs: Vec<u32>,
     normals: Vec<[Vec3; 3]>,
     uvws: Vec<[Vec3; 3]>,
+    bvh: BVH<MeshChunk>,
+}
+
+impl Mesh {
+    pub fn new(
+        triangles: Vec<SimpleTriangle>,
+        normals: Vec<[Vec3; 3]>,
+        uvws: Vec<[Vec3; 3]>,
+    ) -> Self {
+        let mut mesh_refs = Vec::with_capacity(triangles.len());
+        let mut mesh_chunks = Vec::with_capacity(triangles.len() / MESH_CHUNK_SIZE);
+        let mut mesh_normals = Vec::with_capacity(triangles.len());
+        let mut mesh_uvws = Vec::with_capacity(triangles.len());
+
+        if MESH_CHUNK_SIZE == 1 {
+            for (i, ((tri_vertices, tri_normals), tri_uvws)) in triangles
+                .iter()
+                .zip(normals.iter())
+                .zip(uvws.iter())
+                .enumerate()
+            {
+                mesh_refs.push(i as u32);
+                mesh_chunks.push(MeshChunk::new(&[tri_vertices.clone()]));
+                mesh_normals.push(*tri_normals);
+                mesh_uvws.push(*tri_uvws);
+            }
+        } else if MESH_CHUNK_SIZE == 8 || MESH_CHUNK_SIZE == 16 {
+            let clustering = SpatialClustering::new_bvh(triangles.iter().map(|tri| tri.vertices));
+
+            println!("clustering into {} chunks", clustering.chunks.len());
+
+            for chunk in clustering.chunks.iter() {
+                for tri in chunk {
+                    mesh_refs.push(tri.index as u32);
+                    mesh_normals.push(normals[tri.index as usize]);
+                    mesh_uvws.push(uvws[tri.index as usize]);
+                }
+
+                mesh_chunks.push(MeshChunk::new(
+                    &chunk
+                        .iter()
+                        .map(|tri| tri.vertices)
+                        .map(|tri| SimpleTriangle { vertices: tri })
+                        .collect::<Vec<_>>(),
+                ));
+            }
+        } else {
+            unreachable!();
+        }
+
+        println!("building bvh from clusters");
+        let bvh = BVH::build(&mesh_chunks);
+
+        Self {
+            chunks: mesh_chunks,
+            refs: mesh_refs,
+            normals: mesh_normals,
+            uvws: mesh_uvws,
+            bvh,
+        }
+    }
+
+    pub fn chunks(&self) -> &[MeshChunk] {
+        &self.chunks
+    }
+}
+
+impl BoundedGeometry for Mesh {
+    fn local_bounding_box(&self) -> AABB {
+        if self.bvh.nodes().len() == 0 {
+            return AABB::null();
+        }
+
+        // root node has same aabb in both lanes
+        self.bvh.nodes()[0].child_volumes().extract_aabb::<0>()
+    }
+}
+
+impl RaytracableGeometry for Mesh {
+    fn thin_intersection(&self, ray: &Ray, max_t: f64, _compute_uvw: bool) -> Option<Intersection> {
+        let two_ray = TwoRay::new(*ray); // ray used to traverse the bvh
+        let chunk_ray = ChunkRay::new(*ray); // ray used to intersect the chunks
+
+        let mut stack: [i32; 128] = [0; 128];
+        let mut stack_ptr = 1;
+
+        let mut max_t = max_t;
+
+        let mut chunk_id = -1i32; // id of mesh chunk intersected
+        let mut chunk_inner_id = -1i32; // id of triangle in chunk intersected
+
+        while stack_ptr > 0 {
+            debug_assert!(stack_ptr < stack.len());
+
+            stack_ptr -= 1;
+            let node_id = unsafe { stack.get_unchecked(stack_ptr) };
+
+            // println!("node_id: {}", node_id);
+            let node = unsafe { self.bvh.nodes().get_unchecked(*node_id as usize) };
+
+            // debug_assert!(self.chunks.len() >= node.right as usize);
+
+            // println!("node.is_leaf {}", node.is_leaf());
+
+            if !node.is_leaf() {
+                let isect = unsafe { node.child_volumes().test(&two_ray, max_t) };
+
+                match isect.state {
+                    0 => {
+                        // no intersection
+                        continue;
+                    }
+                    1 => {
+                        // left hit
+                        stack[stack_ptr] = node.left_child();
+                        stack_ptr += 1;
+                    }
+                    2 => {
+                        // right hit
+                        stack[stack_ptr] = node.right_child();
+                        stack_ptr += 1;
+                    }
+                    3 => {
+                        // both hit, push the furthest one first,
+                        // so that the closest one is popped first
+                        if isect.left_t1 < isect.right_t1 {
+                            stack[stack_ptr] = node.right_child();
+                            stack_ptr += 1;
+
+                            stack[stack_ptr] = node.left_child();
+                            stack_ptr += 1;
+                        } else {
+                            stack[stack_ptr] = node.left_child();
+                            stack_ptr += 1;
+
+                            stack[stack_ptr] = node.right_child();
+                            stack_ptr += 1;
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            } else {
+                debug_assert!(node.right >= 0 && node.right < self.chunks.len() as i32);
+
+                // println!("isect chunk {}", node.right);
+
+                let chunk = unsafe { self.chunks.get_unchecked(node.right as usize) };
+                let isect = unsafe { chunk_ray.intersect_chunk(chunk, max_t as f32) };
+
+                // println!("isect {:?}", isect);
+
+                debug_assert!(isect.index >= -1 && isect.index < MESH_CHUNK_SIZE as i32);
+
+                if isect.index >= 0 && isect.index < MESH_CHUNK_SIZE as i32 {
+                    max_t = isect.t as f64;
+                    chunk_id = node.right;
+                    chunk_inner_id = isect.index;
+                }
+            }
+        }
+
+        if chunk_id == -1 {
+            None
+        } else {
+            let triangle_index = chunk_id * MESH_CHUNK_SIZE as i32 + chunk_inner_id;
+            let ref_id = unsafe { *self.refs.get_unchecked(triangle_index as usize) as usize };
+
+            let normals = self.normals[ref_id];
+
+            // TODO: compute uvw, smooth normals
+            // let chunk = unsafe { self.chunks.get_unchecked(chunk_id as usize) };
+            // let vertices = chunk.extract_triangle(chunk_inner_id as usize);
+            // let uvws = self.uvws[ref_id];
+
+            Some(Intersection {
+                ray: *ray,
+                t: max_t,
+                normal: DVec3::new(
+                    normals[0].x as f64,
+                    normals[0].y as f64,
+                    normals[0].z as f64,
+                ),
+                uvw: DVec3::zero(),
+                thick_intersection: None,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -646,5 +1109,100 @@ mod tests {
             BufWriter::new(File::create("../data/models/Asian_Dragon_chunked.stl").unwrap());
 
         new_stl.write(&mut bufwriter).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "avx512")]
+    fn test_avx512_chunk_intersection() {
+        use ultraviolet::DVec3;
+
+        use crate::render::{
+            raytracable::mesh::{ChunkRay, MeshChunk, SimpleTriangle},
+            Ray,
+        };
+
+        let mut bufreader =
+            BufReader::new(File::open("../data/models/Stanford_Bunny.stl").unwrap());
+        let stl = STL::new_from_bufreader(&mut bufreader).unwrap();
+
+        // let mesh = Mesh::new(
+        //     stl.triangles
+        //         .iter()
+        //         .map(|tri| tri.vertices)
+        //         .map(|tri| SimpleTriangle { vertices: tri })
+        //         .collect::<Vec<_>>(),
+        //     stl.triangles
+        //         .iter()
+        //         .map(|tri| tri.normal)
+        //         .map(|n| [n; 3])
+        //         .collect::<Vec<_>>(),
+        //     stl.triangles
+        //         .iter()
+        //         .map(|_| [Vec3::zero(); 3])
+        //         .collect::<Vec<_>>(),
+        // );
+
+        let chunk = MeshChunk::new(
+            &stl.triangles
+                .iter()
+                .map(|tri| tri.vertices)
+                .map(|tri| SimpleTriangle { vertices: tri })
+                .collect::<Vec<_>>(),
+        );
+
+        let ray = Ray::new(DVec3::new(3.0, 0.0, 0.0), DVec3::new(-1.0, 0.0, 0.0));
+        let chunk_ray = ChunkRay::new(ray);
+
+        let intersection = unsafe { chunk_ray.intersect_chunk(&chunk, f32::INFINITY) };
+
+        println!("{:?}", intersection);
+    }
+
+    #[test]
+    #[cfg(feature = "avx512")]
+    fn test_avx512_mesh_intersection() {
+        use ultraviolet::{DVec3, Vec3};
+
+        use crate::render::{
+            raytracable::{
+                mesh::{Mesh, SimpleTriangle},
+                RaytracableGeometry,
+            },
+            Ray,
+        };
+
+        let mut bufreader =
+            BufReader::new(File::open("../data/models/Stanford_Bunny.stl").unwrap());
+        let stl = STL::new_from_bufreader(&mut bufreader).unwrap();
+
+        println!("stl has {} triangles", stl.triangles.len());
+
+        let mesh = Mesh::new(
+            stl.triangles
+                .iter()
+                .map(|tri| tri.vertices)
+                .map(|tri| SimpleTriangle { vertices: tri })
+                .collect::<Vec<_>>(),
+            stl.triangles
+                .iter()
+                .map(|tri| tri.normal)
+                .map(|n| [n; 3])
+                .collect::<Vec<_>>(),
+            stl.triangles
+                .iter()
+                .map(|_| [Vec3::zero(); 3])
+                .collect::<Vec<_>>(),
+        );
+
+        // let mut bufwriter = BufWriter::new(File::create("../trash/bvh.dot").unwrap());
+        // mesh.bvh.dump_graphviz(&mut bufwriter).unwrap();
+
+        // println!("mesh.bvh {:#?}", mesh.bvh);
+
+        let ray = Ray::new(DVec3::new(300.0, 0.01, 0.01), DVec3::new(-1.0, 0.0, 0.0));
+
+        let intersection = mesh.thin_intersection(&ray, f64::INFINITY, false);
+
+        println!("{:#?}", intersection);
     }
 }

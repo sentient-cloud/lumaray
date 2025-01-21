@@ -63,4 +63,21 @@ impl TwoVolume {
             right_t2,
         }
     }
+
+    /// Extracts the AABB at index `I` from the TwoVolume.
+    ///
+    /// I = 0 extracts the left AABB, I = 1 extracts the right AABB.
+    pub fn extract_aabb<const I: usize>(&self) -> AABB {
+        if I == 0 {
+            self.left
+        } else {
+            self.right
+        }
+    }
+}
+
+impl Into<(AABB, AABB)> for TwoVolume {
+    fn into(self) -> (AABB, AABB) {
+        (self.left, self.right)
+    }
 }

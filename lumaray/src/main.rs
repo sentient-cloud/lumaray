@@ -4,7 +4,13 @@
 #![feature(generic_const_exprs)]
 #![feature(avx512_target_feature)]
 
-use ultraviolet::DVec3;
+use core::f64;
+use std::{fs::File, io::BufReader, time::Instant};
+
+use parsers::stl::STL;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use render::raytracable::{mesh::Mesh, RaytracableGeometry};
+use ultraviolet::{DVec3, Vec3};
 
 #[cfg(all(feature = "no-simd", feature = "avx512"))]
 compile_error!("Cannot enable no-simd and avx512 features at the same time");
@@ -32,65 +38,59 @@ fn main() {
 
     render::raytracable::bvh::hi();
 
-    let timer = utils::Timer::new();
+    use ultraviolet::DVec3;
 
-    let iters = 1_000_000_000i64;
-    let num_threads = 32;
+    use crate::render::{raytracable::mesh::SimpleTriangle, Ray};
 
-    println!(
-        "running {} iterations each on {} threads",
-        iters, num_threads
+    let model = "../data/models/Stanford_Dragon.stl";
+    let mut bufreader = BufReader::new(File::open(model).unwrap());
+    let stl = STL::new_from_bufreader(&mut bufreader).unwrap();
+
+    let num_triangles = stl.triangles.len();
+
+    let mesh = Mesh::new(
+        stl.triangles
+            .iter()
+            .map(|tri| tri.vertices)
+            .map(|tri| SimpleTriangle { vertices: tri })
+            .collect::<Vec<_>>(),
+        stl.triangles
+            .iter()
+            .map(|tri| tri.normal)
+            .map(|n| [n; 3])
+            .collect::<Vec<_>>(),
+        stl.triangles
+            .iter()
+            .map(|_| [Vec3::zero(); 3])
+            .collect::<Vec<_>>(),
     );
 
-    let threads = (0..num_threads)
-        .map(|_| {
-            std::thread::spawn({
-                let iters = iters;
+    let ray = Ray::new(DVec3::new(300.0, 0.0, 0.0), DVec3::new(-1.0, 0.0, 0.0));
 
-                let left = render::math::AABB::at_point_with_half_size(
-                    DVec3::new(0.0, 0.0, 0.0),
-                    DVec3::new(1.0, 1.0, 1.0),
-                );
+    let iters = 10_000_000usize;
+    let threads = 32;
 
-                let right = render::math::AABB::at_point_with_half_size(
-                    DVec3::new(0.0, 0.5, 0.0),
-                    DVec3::new(1.0, 1.0, 1.0),
-                );
+    let start = Instant::now();
 
-                let two_volume = render::raytracable::bvh::TwoVolume::new(left, right);
+    (0..(iters * threads)).into_par_iter().for_each(|_| {
+        let isect = mesh.thin_intersection(&ray, f64::INFINITY, false);
+        core::hint::black_box(isect);
+    });
 
-                let ray = render::Ray::new(
-                    ultraviolet::DVec3::new(0.0, 5.0, 0.0),
-                    ultraviolet::DVec3::new(0.0, -1.0, 0.0).normalized(),
-                );
+    let elapsed = start.elapsed();
 
-                let two_ray = render::raytracable::bvh::TwoRay::new(ray);
+    println!("Took: {}us", elapsed.as_micros());
 
-                move || {
-                    for _ in 0..iters {
-                        unsafe {
-                            let t = two_volume.test(&two_ray, f64::INFINITY);
-                            // println!("{:?}", t);
-                            core::hint::black_box(t);
-                        }
-                    }
-                }
-            })
-        })
-        .collect::<Vec<_>>();
+    println!("Model: {}", model);
+    println!("Real triangles: {}", num_triangles);
 
-    for t in threads {
-        t.join().unwrap();
-    }
+    let total_virtual_isects = iters * threads * num_triangles;
+    println!("Total virtual intersections: {}", total_virtual_isects);
 
-    println!("{} seconds", timer.elapsed());
     println!(
-        "{:.2} Mrays/s",
-        (num_threads * iters) as f64 / timer.elapsed() / 1_000_000.0
+        "Trillion triangles/s: {}",
+        total_virtual_isects as f64 / elapsed.as_secs_f64() / 1_000_000_000_000.0
     );
-
-    let freq = 5.8e9 * timer.elapsed();
-    println!("{} cycles per iteration", freq / iters as f64);
 }
 
 #[cfg(test)]

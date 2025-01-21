@@ -271,10 +271,7 @@ impl AABB {
 
     /// Returns a new AABB containing another AABB.
     pub fn containing_aabb(&self, other: &AABB) -> Self {
-        Self {
-            min: self.min.min_by_component(other.min),
-            max: self.max.max_by_component(other.max),
-        }
+        self.containing_point(other.min).containing_point(other.max)
     }
 
     /// Contains the point in the AABB.
@@ -286,8 +283,6 @@ impl AABB {
 
     /// Contains the AABB in the AABB.
     pub fn contain_aabb(&mut self, other: &AABB) -> &mut Self {
-        self.min = self.min.min_by_component(other.min);
-        self.max = self.max.max_by_component(other.max);
-        self
+        self.contain_point(other.min).contain_point(other.max)
     }
 }

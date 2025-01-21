@@ -10,6 +10,9 @@ use crate::render::{Ray, AABB};
 use super::TwoVolumeTest;
 
 #[repr(align(16))]
+struct AlignedF64x2([f64; 2]);
+
+#[repr(align(16))]
 struct AlignedF64x4([f64; 4]);
 
 pub struct TwoRay {
@@ -112,5 +115,56 @@ impl TwoVolume {
             right_t1: *tnears.add(1),
             right_t2: *tfars.add(1),
         }
+    }
+    /// Extracts the AABB at index `I` from the TwoVolume.
+    ///
+    /// I = 0 extracts the left AABB, I = 1 extracts the right AABB.
+    pub fn extract_aabb<const I: usize>(&self) -> AABB
+    where
+        [(); constconstrain::is_zero_or_one(I) - 1]:,
+    {
+        if I == 0 {
+            let mut mins = [AlignedF64x2([0.0; 2]); 3];
+            let mut maxs = [AlignedF64x2([0.0; 2]); 3];
+
+            unsafe {
+                _mm_store_pd(mins[0].0.as_mut_ptr(), self.min[0]);
+                _mm_store_pd(mins[1].0.as_mut_ptr(), self.min[1]);
+                _mm_store_pd(mins[2].0.as_mut_ptr(), self.min[2]);
+                _mm_store_pd(maxs[0].0.as_mut_ptr(), self.max[0]);
+                _mm_store_pd(maxs[1].0.as_mut_ptr(), self.max[1]);
+                _mm_store_pd(maxs[2].0.as_mut_ptr(), self.max[2]);
+
+                AABB {
+                    min: DVec3::new(mins[0].0[1], mins[1].0[1], mins[2].0[1]),
+                    max: DVec3::new(maxs[0].0[1], maxs[1].0[1], maxs[2].0[1]),
+                }
+            }
+        } else if I == 1 {
+            let mut mins = [AlignedF64x2([0.0; 2]); 3];
+            let mut maxs = [AlignedF64x2([0.0; 2]); 3];
+
+            unsafe {
+                _mm_store_pd(mins[0].0.as_mut_ptr(), self.min[0]);
+                _mm_store_pd(mins[1].0.as_mut_ptr(), self.min[1]);
+                _mm_store_pd(mins[2].0.as_mut_ptr(), self.min[2]);
+                _mm_store_pd(maxs[0].0.as_mut_ptr(), self.max[0]);
+                _mm_store_pd(maxs[1].0.as_mut_ptr(), self.max[1]);
+                _mm_store_pd(maxs[2].0.as_mut_ptr(), self.max[2]);
+
+                AABB {
+                    min: DVec3::new(mins[0].0[0], mins[1].0[0], mins[2].0[0]),
+                    max: DVec3::new(maxs[0].0[0], maxs[1].0[0], maxs[2].0[0]),
+                }
+            }
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+impl Into<(AABB, AABB)> for TwoVolume {
+    fn into(self) -> (AABB, AABB) {
+        (self.extract_aabb::<0>(), self.extract_aabb::<1>())
     }
 }
