@@ -9,6 +9,7 @@ name = "lumaray"
 path = "src/main.rs"
 
 [dependencies]
+itertools = "0.14.0"
 num-traits = "0.2.19"
 png = "0.17.16"
 rand = "0.8.5"

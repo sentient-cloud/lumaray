@@ -50,11 +50,17 @@ impl Ray {
         self.origin + self.direction * t
     }
 
-    pub fn from_two_points(a: DVec3, b: DVec3) -> Self {
-        Self {
-            origin: a,
-            direction: (b - a).normalized(),
-        }
+    pub fn from_two_points(a: DVec3, b: DVec3) -> (Self, f64) {
+        let direction = b - a;
+        let length = direction.mag();
+        let direction = direction / length;
+        (
+            Self {
+                origin: a,
+                direction,
+            },
+            length,
+        )
     }
 
     /// Adjusts the origin of the ray by a small amount in the direction of the ray.

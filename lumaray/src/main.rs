@@ -5,11 +5,15 @@
 #![feature(avx512_target_feature)]
 
 use core::f64;
-use std::{fs::File, io::BufReader, time::Instant};
+use std::{fs::File, io::BufReader, ops::Shl, time::Instant};
 
 use parsers::stl::STL;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use render::raytracable::{mesh::Mesh, RaytracableGeometry};
+use rand::{thread_rng, Rng};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use render::{
+    camera::Camera,
+    raytracable::{self, mesh::Mesh, RaytracableGeometry},
+};
 use ultraviolet::Vec3;
 
 #[cfg(all(feature = "no-simd", feature = "avx512"))]
@@ -40,19 +44,16 @@ fn main() {
 
     use ultraviolet::DVec3;
 
-    use crate::render::{raytracable::mesh::SimpleTriangle, Ray};
-
-    let model = "../data/models/Asian_Dragon.stl";
+    let model = "../data/models/Wikipedia_Globe.stl";
     let mut bufreader = BufReader::new(File::open(model).unwrap());
     let stl = STL::new_from_bufreader(&mut bufreader).unwrap();
 
-    let num_triangles = stl.triangles.len();
+    println!("{:#?}", stl.triangles.len());
 
     let mesh = Mesh::new(
         stl.triangles
             .iter()
             .map(|tri| tri.vertices)
-            .map(|tri| SimpleTriangle { vertices: tri })
             .collect::<Vec<_>>(),
         stl.triangles
             .iter()
@@ -65,41 +66,57 @@ fn main() {
             .collect::<Vec<_>>(),
     );
 
-    let ray = Ray::new(DVec3::new(300.0, 0.0, 0.0), DVec3::new(-1.0, 0.0, 0.0));
+    // println!("{:#?}", mesh);
 
-    let iters = 50_000_000usize;
-    let threads = 32;
+    let mut film = compositor::Film::new(2048, 1536);
+    let mut chunks = film.subdivide(16);
 
-    let start = Instant::now();
+    let mut camera = render::PerspectiveCamera::new(film.width() as f64, film.height() as f64);
 
-    let (nodes_isect, primitives_isect) = (0..(iters * threads))
-        .into_par_iter()
-        .map(|_| {
-            let isect = mesh.thin_intersection(&ray, f64::INFINITY, false);
-            // assert!(isect.is_some());
-            isect
-                .map(|i| (i.nodes_intersected, i.primitives_intersected))
-                .unwrap_or((0, 0))
+    camera.set_position(DVec3::new(-1.0, 0.2, 0.2));
+    camera.set_look_at(DVec3::zero());
+
+    println!("{:#?}", camera);
+
+    // let sphere = raytracable::Sphere::new(DVec3::zero(), 3.0);
+
+    let now = Instant::now();
+
+    chunks.par_iter_mut().for_each(|chunk| {
+        // chunk.fill(compositor::RGBA::new(
+        //     thread_rng().gen_range(0.0..1.0),
+        //     thread_rng().gen_range(0.0..1.0),
+        //     thread_rng().gen_range(0.0..1.0),
+        //     1.0,
+        // ));
+
+        chunk.iter().for_each(|(x, y)| {
+            // println!("({}, {})", x, y);
+            let ray = camera.get_primary_ray(x as f64, y as f64);
+            let hit = mesh.thin_intersection(&ray, f64::INFINITY, false);
+
+            if let Some(hit) = hit {
+                chunk.splat(x, y, compositor::RGBA::new_normal(hit.normal));
+            }
         })
-        .reduce(|| (0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+    });
 
-    let elapsed = start.elapsed();
+    println!("rendered in {:?}", now.elapsed());
 
-    println!("Intersected {} nodes", nodes_isect);
-    println!("Intersected {} primitives", primitives_isect);
+    for chunk in chunks {
+        film.splat_chunk(chunk);
+    }
 
-    println!("Took: {}us", elapsed.as_micros());
+    let image = compositor::Image::from(film);
+    println!("image {}x{}", image.width, image.height);
+    image.output_as_png("../trash/chunk_test.png").unwrap();
 
-    println!("Model: {}", model);
-    println!("Real triangles: {}", num_triangles);
+    // let film = compositor::Film::new(4, 3);
+    // let chunks = film.subdivide(1);
 
-    let total_virtual_isects = iters * threads * num_triangles;
-    println!("Total virtual intersections: {}", total_virtual_isects);
-
-    println!(
-        "Trillion triangles/s: {}",
-        total_virtual_isects as f64 / elapsed.as_secs_f64() / 1_000_000_000_000.0
-    );
+    // chunks[0].iter().for_each(|(x, y)| {
+    //     println!("({}, {})", x, y);
+    // });
 }
 
 #[cfg(test)]

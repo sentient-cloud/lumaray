@@ -1,5 +1,7 @@
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
+use ultraviolet::DVec3;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RGBA {
     pub r: f64,
@@ -11,6 +13,15 @@ pub struct RGBA {
 impl RGBA {
     pub fn new(r: f64, g: f64, b: f64, a: f64) -> Self {
         Self { r, g, b, a }
+    }
+
+    pub fn new_normal(normal: DVec3) -> Self {
+        Self {
+            r: (normal.x + 1.0) / 2.0,
+            g: (normal.y + 1.0) / 2.0,
+            b: (normal.z + 1.0) / 2.0,
+            a: 1.0,
+        }
     }
 
     /// Create a new RGBA color from a 24-bit hex value.

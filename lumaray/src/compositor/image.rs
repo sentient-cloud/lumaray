@@ -202,9 +202,9 @@ impl Image {
 
 impl From<Film> for Image {
     fn from(film: Film) -> Self {
-        let mut image = Image::new(film.width, film.height);
-        for y in 0..film.height {
-            for x in 0..film.width {
+        let mut image = Image::new(film.width(), film.height());
+        for y in 0..film.height() {
+            for x in 0..film.width() {
                 *image.get_mut(x, y) = film.get_rgba(x, y);
             }
         }

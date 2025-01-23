@@ -24,11 +24,6 @@ use super::{
     BoundedGeometry, Intersection, Ray, RaytracableGeometry,
 };
 
-#[derive(Debug, Clone)]
-pub struct SimpleTriangle {
-    pub vertices: [Vec3; 3],
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkIntersection {
     t: f32,     // distance to intersection, or undefined if no hit
@@ -83,6 +78,7 @@ pub struct MeshChunk {
     pub edge2: [__m256; 3],
     pub vert0: [__m256; 3],
     pub active: u8,
+    pub index: [i32; MESH_CHUNK_SIZE],
 }
 
 #[cfg(feature = "avx512")]
@@ -98,6 +94,7 @@ pub struct MeshChunk {
     pub edge2: [__m512; 3],
     pub vert0: [__m512; 3],
     pub active: u16,
+    pub index: [i32; MESH_CHUNK_SIZE],
 }
 
 // TODO:
@@ -477,19 +474,13 @@ impl SpatialClustering {
 #[derive(Debug)]
 pub struct Mesh {
     chunks: Vec<MeshChunk>,
-    refs: Vec<u32>,
     normals: Vec<[Vec3; 3]>,
     uvws: Vec<[Vec3; 3]>,
     bvh: BVH<MeshChunk>,
 }
 
 impl Mesh {
-    pub fn new(
-        triangles: Vec<SimpleTriangle>,
-        normals: Vec<[Vec3; 3]>,
-        uvws: Vec<[Vec3; 3]>,
-    ) -> Self {
-        let mut mesh_refs = Vec::with_capacity(triangles.len());
+    pub fn new(triangles: Vec<[Vec3; 3]>, normals: Vec<[Vec3; 3]>, uvws: Vec<[Vec3; 3]>) -> Self {
         let mut mesh_chunks = Vec::with_capacity(triangles.len() / MESH_CHUNK_SIZE);
         let mut mesh_normals = Vec::with_capacity(triangles.len());
         let mut mesh_uvws = Vec::with_capacity(triangles.len());
@@ -501,30 +492,34 @@ impl Mesh {
                 .zip(uvws.iter())
                 .enumerate()
             {
-                mesh_refs.push(i as u32);
-                mesh_chunks.push(MeshChunk::new(&[tri_vertices.clone()]));
+                #[allow(unused_mut)]
+                let mut chunk = MeshChunk::new(&vec![OrderedTriangle {
+                    vertices: *tri_vertices,
+                    index: i as i32,
+                    code: 0,
+                }]);
+
+                mesh_chunks.push(chunk);
                 mesh_normals.push(*tri_normals);
                 mesh_uvws.push(*tri_uvws);
             }
         } else if MESH_CHUNK_SIZE == 8 || MESH_CHUNK_SIZE == 16 {
-            let clustering = SpatialClustering::new_bvh(triangles.iter().map(|tri| tri.vertices));
+            let clustering = SpatialClustering::new_bvh(triangles.iter().cloned());
 
-            // println!("clustering into {} chunks", clustering.chunks.len());
+            // println!("clustering {:#?}", clustering);
+
+            let mut num = 0;
 
             for chunk in clustering.chunks.iter() {
-                for tri in chunk {
-                    mesh_refs.push(tri.index as u32);
-                    mesh_normals.push(normals[tri.index as usize]);
-                    mesh_uvws.push(uvws[tri.index as usize]);
+                debug_assert!(chunk.len() <= MESH_CHUNK_SIZE);
+
+                for _ in chunk {
+                    mesh_normals.push(normals[num]);
+                    mesh_uvws.push(uvws[num]);
+                    num += 1;
                 }
 
-                mesh_chunks.push(MeshChunk::new(
-                    &chunk
-                        .iter()
-                        .map(|tri| tri.vertices)
-                        .map(|tri| SimpleTriangle { vertices: tri })
-                        .collect::<Vec<_>>(),
-                ));
+                mesh_chunks.push(MeshChunk::new(chunk));
             }
         } else {
             unreachable!();
@@ -535,7 +530,6 @@ impl Mesh {
 
         Self {
             chunks: mesh_chunks,
-            refs: mesh_refs,
             normals: mesh_normals,
             uvws: mesh_uvws,
             bvh,
@@ -569,7 +563,9 @@ impl RaytracableGeometry for Mesh {
         let mut max_t = max_t;
 
         let mut chunk_id = -1i32; // id of mesh chunk intersected
-        let mut chunk_inner_id = -1i32; // id of triangle in chunk intersected
+        let mut triangle_ref_id = -1i32;
+
+        // let mut chunk_inner_id = -1i32; // id of triangle in chunk intersected
 
         let mut nodes_intersected = 0;
         let mut primitives_intersected = 0;
@@ -638,21 +634,25 @@ impl RaytracableGeometry for Mesh {
 
                 debug_assert!(isect.index >= -1 && isect.index < MESH_CHUNK_SIZE as i32);
 
-                if isect.index >= 0 && isect.index < MESH_CHUNK_SIZE as i32 {
+                if chunk.is_active(isect.index) && isect.t < max_t as f32 {
                     max_t = isect.t as f64;
                     chunk_id = node.right;
-                    chunk_inner_id = isect.index;
+                    // chunk_inner_id = isect.index;
+                    triangle_ref_id = chunk.extract_ref_index(isect.index);
                 }
             }
         }
 
         if chunk_id == -1 {
+            debug_assert!(triangle_ref_id == -1);
             None
         } else {
-            let triangle_index = chunk_id * MESH_CHUNK_SIZE as i32 + chunk_inner_id;
-            let ref_id = unsafe { *self.refs.get_unchecked(triangle_index as usize) as usize };
+            debug_assert!(triangle_ref_id != -1);
 
-            let normals = self.normals[ref_id];
+            // let triangle_index = chunk_id * MESH_CHUNK_SIZE as i32 + chunk_inner_id;
+            // let ref_id = unsafe { *self.refs.get_unchecked(triangle_index as usize) as usize };
+
+            let normals = self.normals[triangle_ref_id as usize];
 
             // TODO: compute uvw, smooth normals
             // let chunk = unsafe { self.chunks.get_unchecked(chunk_id as usize) };
@@ -678,7 +678,7 @@ impl RaytracableGeometry for Mesh {
 
 #[cfg(feature = "avx512")]
 impl MeshChunk {
-    pub fn new(triangles: &[SimpleTriangle]) -> Self {
+    pub fn new(triangles: &Vec<OrderedTriangle>) -> Self {
         use crate::utils::alignedmem::AlignedF32x16;
 
         debug_assert!(triangles.len() <= MESH_CHUNK_SIZE);
@@ -687,6 +687,7 @@ impl MeshChunk {
         let mut edge2 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
         let mut vert0 = [AlignedF32x16([f32::NAN; MESH_CHUNK_SIZE]); 3];
         let mut active = 0;
+        let mut index = [-1; MESH_CHUNK_SIZE];
 
         for i in 0..triangles.len().min(MESH_CHUNK_SIZE) {
             let e1 = triangles[i].vertices[1] - triangles[i].vertices[0];
@@ -704,6 +705,8 @@ impl MeshChunk {
             vert0[2].0[i] = v0.z;
 
             active |= 1 << i;
+
+            index[i] = triangles[i].index;
         }
 
         unsafe {
@@ -724,12 +727,24 @@ impl MeshChunk {
                     _mm512_load_ps(vert0[2].0.as_ptr()),
                 ],
                 active,
+                index,
             }
         }
     }
 
-    #[cfg(feature = "avx512")]
-    pub fn extract_triangle(&self, index: usize) -> SimpleTriangle {
+    pub fn is_active(&self, index: i32) -> bool {
+        if index < 0 || index >= MESH_CHUNK_SIZE as i32 {
+            false
+        } else {
+            self.active & (1 << index) > 0
+        }
+    }
+
+    pub fn extract_ref_index(&self, index: i32) -> i32 {
+        self.index[index as usize]
+    }
+
+    pub fn extract_triangle(&self, index: usize) -> [Vec3; 3] {
         let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
         let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
         let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
@@ -746,21 +761,19 @@ impl MeshChunk {
             _mm512_store_ps(vert0[2].0.as_mut_ptr(), self.vert0[2]);
         }
 
-        SimpleTriangle {
-            vertices: [
-                Vec3::new(vert0[0].0[index], vert0[1].0[index], vert0[2].0[index]),
-                Vec3::new(
-                    vert0[0].0[index] + edge1[0].0[index],
-                    vert0[1].0[index] + edge1[1].0[index],
-                    vert0[2].0[index] + edge1[2].0[index],
-                ),
-                Vec3::new(
-                    vert0[0].0[index] + edge2[0].0[index],
-                    vert0[1].0[index] + edge2[1].0[index],
-                    vert0[2].0[index] + edge2[2].0[index],
-                ),
-            ],
-        }
+        [
+            Vec3::new(vert0[0].0[index], vert0[1].0[index], vert0[2].0[index]),
+            Vec3::new(
+                vert0[0].0[index] + edge1[0].0[index],
+                vert0[1].0[index] + edge1[1].0[index],
+                vert0[2].0[index] + edge1[2].0[index],
+            ),
+            Vec3::new(
+                vert0[0].0[index] + edge2[0].0[index],
+                vert0[1].0[index] + edge2[1].0[index],
+                vert0[2].0[index] + edge2[2].0[index],
+            ),
+        ]
     }
 }
 
@@ -1130,7 +1143,7 @@ mod tests {
         use ultraviolet::DVec3;
 
         use crate::render::{
-            raytracable::mesh::{ChunkRay, MeshChunk, SimpleTriangle},
+            raytracable::mesh::{ChunkRay, MeshChunk},
             Ray,
         };
 
@@ -1138,28 +1151,10 @@ mod tests {
             BufReader::new(File::open("../data/models/Stanford_Bunny.stl").unwrap());
         let stl = STL::new_from_bufreader(&mut bufreader).unwrap();
 
-        // let mesh = Mesh::new(
-        //     stl.triangles
-        //         .iter()
-        //         .map(|tri| tri.vertices)
-        //         .map(|tri| SimpleTriangle { vertices: tri })
-        //         .collect::<Vec<_>>(),
-        //     stl.triangles
-        //         .iter()
-        //         .map(|tri| tri.normal)
-        //         .map(|n| [n; 3])
-        //         .collect::<Vec<_>>(),
-        //     stl.triangles
-        //         .iter()
-        //         .map(|_| [Vec3::zero(); 3])
-        //         .collect::<Vec<_>>(),
-        // );
-
         let chunk = MeshChunk::new(
             &stl.triangles
                 .iter()
                 .map(|tri| tri.vertices)
-                .map(|tri| SimpleTriangle { vertices: tri })
                 .collect::<Vec<_>>(),
         );
 
@@ -1177,10 +1172,7 @@ mod tests {
         use ultraviolet::{DVec3, Vec3};
 
         use crate::render::{
-            raytracable::{
-                mesh::{Mesh, SimpleTriangle},
-                RaytracableGeometry,
-            },
+            raytracable::{mesh::Mesh, RaytracableGeometry},
             Ray,
         };
 
@@ -1194,7 +1186,6 @@ mod tests {
             stl.triangles
                 .iter()
                 .map(|tri| tri.vertices)
-                .map(|tri| SimpleTriangle { vertices: tri })
                 .collect::<Vec<_>>(),
             stl.triangles
                 .iter()
