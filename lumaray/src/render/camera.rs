@@ -7,8 +7,8 @@ pub trait Camera {
     fn forward(&self) -> DVec3;
     fn right(&self) -> DVec3;
     fn up(&self) -> DVec3;
-    fn fov_x(&self) -> f64;
     fn fov_y(&self) -> f64;
+    fn fov_x(&self) -> f64;
 
     fn get_primary_ray(&self, x: f64, y: f64) -> Ray;
 
@@ -32,7 +32,7 @@ pub struct PerspectiveCamera {
 }
 
 impl PerspectiveCamera {
-    pub fn new(film_height: f64, film_width: f64) -> Self {
+    pub fn new(film_width: f64, film_height: f64) -> Self {
         let position = DVec3::zero();
         let forward = DVec3::unit_x();
         let right = DVec3::unit_y();
@@ -69,23 +69,22 @@ impl Camera for PerspectiveCamera {
         self.up
     }
 
-    fn fov_x(&self) -> f64 {
-        self.fov_x * self.film_width / self.film_height
+    fn fov_y(&self) -> f64 {
+        self.fov_x * self.film_height / self.film_width
     }
 
-    fn fov_y(&self) -> f64 {
+    fn fov_x(&self) -> f64 {
         self.fov_x
     }
 
     fn get_primary_ray(&self, x: f64, y: f64) -> Ray {
         let xi = 2.0 * x / self.film_width - 1.0;
         let yi = 2.0 * y / self.film_height - 1.0;
-        let xi = xi * self.fov_x;
-        let yi = yi * self.fov_x * self.film_height / self.film_width;
-
+        let xi = xi * self.fov_x();
+        let yi = yi * self.fov_y();
         Ray::new(
             self.position,
-            (self.forward + self.right * xi - self.up * yi).normalized(),
+            (self.forward - self.right * xi - self.up * yi).normalized(),
         )
     }
 
@@ -116,7 +115,7 @@ impl Camera for PerspectiveCamera {
         rotation.rotate_vec(&mut self.up);
     }
 
-    fn set_fov(&mut self, fov_y: f64) {
-        self.fov_x = (degrees_to_radians(fov_y) / 2.0).tan();
+    fn set_fov(&mut self, fov_x: f64) {
+        self.fov_x = (degrees_to_radians(fov_x) / 2.0).tan();
     }
 }
