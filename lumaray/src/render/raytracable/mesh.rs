@@ -31,7 +31,7 @@ pub struct ChunkIntersection {
 }
 
 #[derive(Debug, Clone)]
-struct OrderedTriangle {
+pub struct OrderedTriangle {
     /// Original vertices of the triangle
     pub vertices: [Vec3; 3],
 
@@ -214,8 +214,6 @@ impl SpatialClustering {
             debug_assert!(mask_index < MORTON_MASKS.len());
             debug_assert!(cluster.triangles.len() > MESH_CHUNK_SIZE);
 
-            // println!("splitting cluster with mask {}", mask_index);
-
             let mask = MORTON_MASKS[mask_index];
 
             let mut new_clusters = vec![];
@@ -249,12 +247,6 @@ impl SpatialClustering {
                 });
             }
 
-            // println!(
-            //     "split cluster of {} triangles into {} clusters",
-            //     cluster.triangles.len(),
-            //     new_clusters.len()
-            // );
-
             new_clusters
         };
 
@@ -280,8 +272,6 @@ impl SpatialClustering {
                     break;
                 }
             }
-
-            // println!("cluster to split: {}", cluster_to_split);
 
             if !done {
                 // move the cluster out of the clusters vector by exchanging their
@@ -319,7 +309,6 @@ impl SpatialClustering {
 
                     new_clusters
                 } else {
-                    // println!("clustering morton split");
                     split_cluster(cluster)
                 };
 
@@ -506,8 +495,6 @@ impl Mesh {
         } else if MESH_CHUNK_SIZE == 8 || MESH_CHUNK_SIZE == 16 {
             let clustering = SpatialClustering::new_bvh(triangles.iter().cloned());
 
-            // println!("clustering {:#?}", clustering);
-
             let mut num = 0;
 
             for chunk in clustering.chunks.iter() {
@@ -525,7 +512,6 @@ impl Mesh {
             unreachable!();
         }
 
-        // println!("building bvh from clusters");
         let bvh = BVH::build(&mesh_chunks);
 
         Self {
@@ -534,6 +520,14 @@ impl Mesh {
             uvws: mesh_uvws,
             bvh,
         }
+    }
+
+    pub fn normal(&self, index: i32) -> [Vec3; 3] {
+        self.normals[index as usize]
+    }
+
+    pub fn uvw(&self, index: i32) -> [Vec3; 3] {
+        self.uvws[index as usize]
     }
 
     pub fn chunks(&self) -> &[MeshChunk] {
@@ -554,7 +548,7 @@ impl BoundedGeometry for Mesh {
 
 impl RaytracableGeometry for Mesh {
     fn thin_intersection(&self, ray: &Ray, max_t: f64, _compute_uvw: bool) -> Option<Intersection> {
-        let two_ray = TwoRay::new(*ray); // ray used to traverse the bvh
+        let two_ray = unsafe { TwoRay::new(*ray) }; // ray used to traverse the bvh
         let chunk_ray = ChunkRay::new(*ray); // ray used to intersect the chunks
 
         let mut stack: [i32; 128] = [0; 128];
@@ -565,8 +559,6 @@ impl RaytracableGeometry for Mesh {
         let mut chunk_id = -1i32; // id of mesh chunk intersected
         let mut triangle_ref_id = -1i32;
 
-        // let mut chunk_inner_id = -1i32; // id of triangle in chunk intersected
-
         let mut nodes_intersected = 0;
         let mut primitives_intersected = 0;
 
@@ -576,12 +568,7 @@ impl RaytracableGeometry for Mesh {
             stack_ptr -= 1;
             let node_id = unsafe { stack.get_unchecked(stack_ptr) };
 
-            // println!("node_id: {}", node_id);
             let node = unsafe { self.bvh.nodes().get_unchecked(*node_id as usize) };
-
-            // debug_assert!(self.chunks.len() >= node.right as usize);
-
-            // println!("node.is_leaf {}", node.is_leaf());
 
             if !node.is_leaf() {
                 nodes_intersected += 1;
@@ -625,19 +612,15 @@ impl RaytracableGeometry for Mesh {
                 debug_assert!(node.right >= 0 && node.right < self.chunks.len() as i32);
 
                 primitives_intersected += 1;
-                // println!("isect chunk {}", node.right);
 
                 let chunk = unsafe { self.chunks.get_unchecked(node.right as usize) };
                 let isect = unsafe { chunk_ray.intersect_chunk(chunk, max_t as f32) };
-
-                // println!("isect {:?}", isect);
 
                 debug_assert!(isect.index >= -1 && isect.index < MESH_CHUNK_SIZE as i32);
 
                 if chunk.is_active(isect.index) && isect.t < max_t as f32 {
                     max_t = isect.t as f64;
                     chunk_id = node.right;
-                    // chunk_inner_id = isect.index;
                     triangle_ref_id = chunk.extract_ref_index(isect.index);
                 }
             }
@@ -829,7 +812,7 @@ impl BoundedGeometry for MeshChunk {
         aabb
     }
 
-    fn center_point(&self) -> DVec3 {
+    fn local_center_point(&self) -> DVec3 {
         let mut edge1 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
         let mut edge2 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
         let mut vert0 = [AlignedF32x16([0.0; MESH_CHUNK_SIZE]); 3];
@@ -933,7 +916,13 @@ impl ChunkRay {
 
         let q = avx512_cross(&self.direction, &chunk.edge2);
         let a = avx512_dot(&chunk.edge1, &q);
+
+        #[cfg(not(feature = "fast-reciprocal"))]
         let f = _mm512_div_ps(_mm512_set1_ps(1.0), a);
+
+        #[cfg(feature = "fast-reciprocal")]
+        let f = _mm512_rcp14_ps(a);
+
         let s = avx512_sub(&self.origin, &chunk.vert0);
         let r = avx512_cross(&s, &chunk.edge1);
 
@@ -1057,7 +1046,10 @@ mod tests {
             now.elapsed().as_micros()
         );
 
-        let mut new_stl = STL { triangles: vec![] };
+        let mut new_stl = STL {
+            header: [0; 80],
+            triangles: vec![],
+        };
 
         println!("clustering has {} chunks", clustering.chunks.len());
         let mut chunk_sizes = [0; MESH_CHUNK_SIZE];
@@ -1105,7 +1097,10 @@ mod tests {
             now.elapsed().as_micros()
         );
 
-        let mut new_stl = STL { triangles: vec![] };
+        let mut new_stl = STL {
+            header: [0; 80],
+            triangles: vec![],
+        };
 
         println!("clustering has {} chunks", clustering.chunks.len());
         let mut chunk_sizes = [0; MESH_CHUNK_SIZE];
@@ -1143,7 +1138,7 @@ mod tests {
         use ultraviolet::DVec3;
 
         use crate::render::{
-            raytracable::mesh::{ChunkRay, MeshChunk},
+            raytracable::mesh::{ChunkRay, MeshChunk, OrderedTriangle},
             Ray,
         };
 
@@ -1154,7 +1149,11 @@ mod tests {
         let chunk = MeshChunk::new(
             &stl.triangles
                 .iter()
-                .map(|tri| tri.vertices)
+                .map(|tri| OrderedTriangle {
+                    vertices: tri.vertices,
+                    index: 0,
+                    code: 0,
+                })
                 .collect::<Vec<_>>(),
         );
 
@@ -1197,11 +1196,6 @@ mod tests {
                 .map(|_| [Vec3::zero(); 3])
                 .collect::<Vec<_>>(),
         );
-
-        // let mut bufwriter = BufWriter::new(File::create("../trash/bvh.dot").unwrap());
-        // mesh.bvh.dump_graphviz(&mut bufwriter).unwrap();
-
-        // println!("mesh.bvh {:#?}", mesh.bvh);
 
         let ray = Ray::new(DVec3::new(300.0, 0.01, 0.01), DVec3::new(-1.0, 0.0, 0.0));
 

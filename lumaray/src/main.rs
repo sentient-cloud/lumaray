@@ -5,21 +5,22 @@
 #![feature(avx512_target_feature)]
 
 use core::f64;
-use std::{fs::File, io::BufReader, ops::Shl, time::Instant};
+use std::{fs::File, io::BufReader, sync::Arc, time::Instant};
 
 use parsers::stl::STL;
-use rand::{thread_rng, Rng};
-use rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rand::Rng;
+use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use render::{
     camera::Camera,
-    raytracable::{self, mesh::Mesh, RaytracableGeometry},
+    raytracable::{mesh::Mesh, MeshInstance, RaytracableGeometry},
 };
-use ultraviolet::Vec3;
+use ultraviolet::{DMat4, Vec3};
 
 #[cfg(all(feature = "no-simd", feature = "avx512"))]
 compile_error!("Cannot enable no-simd and avx512 features at the same time");
 
 mod compositor;
+mod io;
 mod parsers;
 mod render;
 mod utils;
@@ -44,7 +45,7 @@ fn main() {
 
     use ultraviolet::DVec3;
 
-    let model = "../data/models/Wikipedia_Globe.stl";
+    let model = "../data/models/Asian_Dragon.stl";
     let mut bufreader = BufReader::new(File::open(model).unwrap());
     let stl = STL::new_from_bufreader(&mut bufreader).unwrap();
 
@@ -66,40 +67,64 @@ fn main() {
             .collect::<Vec<_>>(),
     );
 
-    // println!("{:#?}", mesh);
+    let mesh = Arc::new(mesh);
+
+    let mesh_instance1 = MeshInstance::new(
+        mesh.clone(),
+        DMat4::from_rotation_z(0.3) * DMat4::from_translation(DVec3::new(0.0, -80.0, 0.0)),
+    );
+
+    let mesh_instance2 = MeshInstance::new(
+        mesh.clone(),
+        DMat4::from_rotation_z(-0.3) * DMat4::from_translation(DVec3::new(0.0, 80.0, 0.0)),
+    );
 
     let mut film = compositor::Film::new(2048, 1536);
-    let mut chunks = film.subdivide(16);
+    let mut chunks = film.subdivide(32);
 
     let mut camera = render::PerspectiveCamera::new(film.width() as f64, film.height() as f64);
 
-    camera.set_position(DVec3::new(-1.0, 0.2, 0.2));
-    camera.set_look_at(DVec3::zero());
-
-    println!("{:#?}", camera);
-
-    // let sphere = raytracable::Sphere::new(DVec3::zero(), 3.0);
+    camera.set_position(DVec3::new(250.0, 50.0, 120.0));
+    camera.set_look_at(DVec3::new(0.0, -10.0, 0.0));
+    camera.set_direction(camera.forward());
+    camera.set_fov(65.0);
 
     let now = Instant::now();
+    let mut sample_time = Instant::now();
 
-    chunks.par_iter_mut().for_each(|chunk| {
-        // chunk.fill(compositor::RGBA::new(
-        //     thread_rng().gen_range(0.0..1.0),
-        //     thread_rng().gen_range(0.0..1.0),
-        //     thread_rng().gen_range(0.0..1.0),
-        //     1.0,
-        // ));
+    for i in 0..256 {
+        chunks.par_iter_mut().for_each(|chunk| {
+            chunk.iter().for_each(|(x, y)| {
+                let ray = camera.get_primary_ray(
+                    x as f64 + rand::thread_rng().gen_range(-0.5..0.5),
+                    y as f64 + rand::thread_rng().gen_range(-0.5..0.5),
+                );
 
-        chunk.iter().for_each(|(x, y)| {
-            // println!("({}, {})", x, y);
-            let ray = camera.get_primary_ray(x as f64, y as f64);
-            let hit = mesh.thin_intersection(&ray, f64::INFINITY, false);
+                let mut hit = mesh_instance1.thin_intersection(&ray, f64::INFINITY, false);
+                let hit2 = mesh_instance2.thin_intersection(&ray, f64::INFINITY, false);
 
-            if let Some(hit) = hit {
-                chunk.splat(x, y, compositor::RGBA::new_normal(hit.normal));
-            }
-        })
-    });
+                if let Some(hit2) = hit2 {
+                    if let Some(hit1) = hit {
+                        if hit2.t < hit1.t {
+                            hit = Some(hit2);
+                        }
+                    } else {
+                        hit = Some(hit2);
+                    }
+                }
+
+                if let Some(hit) = hit {
+                    chunk.splat(x, y, compositor::RGBA::new_normal(hit.normal));
+                } else {
+                    chunk.splat(x, y, compositor::RGBA::new(0.1, 0.2, 0.3, 1.0));
+                }
+            });
+        });
+        println!("sample {}, took {:?}", i, sample_time.elapsed());
+        sample_time = Instant::now();
+    }
+
+    // println!("max_x: {}, max_y: {}", max_x, max_y);
 
     println!("rendered in {:?}", now.elapsed());
 
@@ -108,15 +133,9 @@ fn main() {
     }
 
     let image = compositor::Image::from(film);
-    println!("image {}x{}", image.width, image.height);
-    image.output_as_png("../trash/chunk_test.png").unwrap();
-
-    // let film = compositor::Film::new(4, 3);
-    // let chunks = film.subdivide(1);
-
-    // chunks[0].iter().for_each(|(x, y)| {
-    //     println!("({}, {})", x, y);
-    // });
+    image
+        .output_as_png("../images/asian_dragon_normals.png")
+        .unwrap();
 }
 
 #[cfg(test)]

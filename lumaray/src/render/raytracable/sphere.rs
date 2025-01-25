@@ -117,7 +117,7 @@ impl BoundedGeometry for Sphere {
             .contain_point(self.center + DVec3::broadcast(self.radius))
     }
 
-    fn center_point(&self) -> DVec3 {
+    fn local_center_point(&self) -> DVec3 {
         self.center
     }
 }

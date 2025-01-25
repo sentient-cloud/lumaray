@@ -24,4 +24,12 @@ impl Scene {
     pub fn textures_mut(&mut self) -> &mut HashindMap<String, Arc<Texture>> {
         &mut self.textures
     }
+
+    pub fn meshes(&self) -> &HashindMap<String, Arc<Mesh>> {
+        &self.meshes
+    }
+
+    pub fn meshes_mut(&mut self) -> &mut HashindMap<String, Arc<Mesh>> {
+        &mut self.meshes
+    }
 }

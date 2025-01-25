@@ -2,10 +2,17 @@ use ultraviolet::DVec3;
 
 pub mod bvh;
 pub mod mesh;
+pub mod mesh_instance;
 pub mod sphere;
 
 #[allow(unused_imports)]
 pub(crate) use sphere::Sphere;
+
+#[allow(unused_imports)]
+pub(crate) use mesh::Mesh;
+
+#[allow(unused_imports)]
+pub(crate) use mesh_instance::MeshInstance;
 
 use super::{math::EPS, Ray, AABB};
 
@@ -108,32 +115,48 @@ pub trait RaytracableGeometry {
         DVec3::zero()
     }
 
-    /// Translates a point to the objects local space.
+    /// Transforms a point to the objects local space.
     ///
     /// By default this simply returns the point.
     fn point_to_local_space(&self, point: DVec3) -> DVec3 {
         point
     }
 
-    /// Translates a point to the objects world space.
+    /// Transforms a point to the objects world space.
     ///
     /// By default this simply returns the point.
     fn point_to_world_space(&self, point: DVec3) -> DVec3 {
         point
     }
 
-    /// Translates a direction to the objects local space.
+    /// Transforms a direction to the objects local space.
     ///
     /// By default this simply returns the direction.
     fn direction_to_local_space(&self, direction: DVec3) -> DVec3 {
         direction
     }
 
-    /// Translates a direction to the objects world space.
+    /// Transforms a direction to the objects world space.
     ///
     /// By default this simply returns the direction.
     fn direction_to_world_space(&self, direction: DVec3) -> DVec3 {
         direction
+    }
+
+    /// Transforms a ray to the objects local space.
+    fn ray_to_local_space(&self, ray: &Ray) -> Ray {
+        Ray::new(
+            self.point_to_local_space(ray.origin),
+            self.direction_to_local_space(ray.direction),
+        )
+    }
+
+    /// Transforms a ray to the objects world space.
+    fn ray_to_world_space(&self, ray: &Ray) -> Ray {
+        Ray::new(
+            self.point_to_world_space(ray.origin),
+            self.direction_to_world_space(ray.direction),
+        )
     }
 }
 
@@ -150,7 +173,13 @@ pub trait BoundedGeometry {
 
     /// Returns the center of the object. This does not have to be the true geometric center
     /// and defaults to the center of the bounding box.
-    fn center_point(&self) -> DVec3 {
+    fn local_center_point(&self) -> DVec3 {
         self.local_bounding_box().center()
+    }
+
+    /// Returns the center of the object in world space.
+    /// By default this simply returns the same as `local_center_point`.
+    fn world_center_point(&self) -> DVec3 {
+        self.local_center_point()
     }
 }

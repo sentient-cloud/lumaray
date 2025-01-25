@@ -1,4 +1,4 @@
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 
 use ultraviolet::Vec3;
 
@@ -11,6 +11,7 @@ pub struct STLTriangle {
 
 #[derive(Debug)]
 pub struct STL {
+    pub header: [u8; 80],
     pub triangles: Vec<STLTriangle>,
 }
 
@@ -19,9 +20,10 @@ impl STL {
     where
         R: Read + Seek,
     {
-        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
 
-        reader.seek(SeekFrom::Current(80))?;
+        let mut header = [0u8; 80];
+        reader.read_exact(&mut header)?;
 
         let mut num_tris_buf = [0u8; 4];
         reader.read_exact(&mut num_tris_buf)?;
@@ -77,16 +79,14 @@ impl STL {
 
             let attribute = u16::from_le_bytes([tri_buf[48], tri_buf[49]]);
 
-            vertices.push(STLTriangle {
+            triangles.push(STLTriangle {
                 normal,
                 vertices: [v1, v2, v3],
                 attribute,
             });
         }
 
-        Ok(STL {
-            triangles: vertices,
-        })
+        Ok(STL { header, triangles })
     }
 
     pub fn write<W>(&self, writer: &mut W) -> Result<(), std::io::Error>

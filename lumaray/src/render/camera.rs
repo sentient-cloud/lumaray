@@ -104,11 +104,8 @@ impl Camera for PerspectiveCamera {
         // prior rotations are preserved
 
         let new_forward = (look_at - self.position).normalized();
-        println!("{:?}", new_forward);
 
         let rotation = DRotor3::from_rotation_between(self.forward, new_forward).normalized();
-
-        println!("{:?}", rotation);
 
         rotation.rotate_vec(&mut self.forward);
         rotation.rotate_vec(&mut self.right);

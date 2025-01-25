@@ -109,9 +109,6 @@ pub struct BVHTraverseResult {
     pub node_id: i32,
     pub primitive_id: i32,
     pub t: f64,
-    pub nodes_visited: usize,
-    pub nodes_intersected: usize,
-    pub primitives_intersected: usize,
 }
 
 impl<T> BVH<T>
@@ -147,7 +144,7 @@ where
 
         let midpoints = primitives
             .iter()
-            .map(|obj| obj.center_point())
+            .map(|obj| obj.local_center_point())
             .collect::<Vec<_>>();
 
         let bboxes = primitives
@@ -290,6 +287,7 @@ where
             }
         }
 
+        #[cfg(debug_assertions)]
         for node in &mut nodes {
             if node.left == -1 && node.right == -1 {
                 panic!("leaf: {:?}", node);
@@ -352,11 +350,7 @@ where
     T: BoundedGeometry + RaytracableGeometry,
 {
     pub fn traverse(&self, ray: &Ray, max_t: f64, primitives: &[T]) -> BVHTraverseResult {
-        let two_ray = TwoRay::new(*ray);
-
-        let mut nodes_visited = 0;
-        let mut nodes_intersected = 0;
-        let mut primitives_intersected = 0;
+        let two_ray = unsafe { TwoRay::new(*ray) };
 
         let mut stack: [i32; 128] = [0; 128];
         let mut stack_ptr = 1;
@@ -366,8 +360,6 @@ where
         let mut primitive_id = -1i32;
 
         while stack_ptr > 0 {
-            nodes_visited += 1;
-
             debug_assert!(stack_ptr < stack.len());
 
             stack_ptr -= 1;
@@ -377,7 +369,6 @@ where
             debug_assert!(primitives.len() > node.right as usize);
 
             if !node.is_leaf() {
-                nodes_intersected += 1;
                 let isect = unsafe { node.child_volumes().test(&two_ray, max_t) };
 
                 match isect.state {
@@ -417,7 +408,6 @@ where
             } else {
                 debug_assert!(node.right >= 0 && node.right < primitives.len() as i32);
 
-                primitives_intersected += 1;
                 let primitive = unsafe { primitives.get_unchecked(node.right as usize) };
 
                 if let Some(t) = primitive.thin_intersection(ray, max_t, false) {
@@ -434,9 +424,6 @@ where
             node_id,
             primitive_id,
             t: max_t,
-            nodes_visited,
-            nodes_intersected,
-            primitives_intersected,
         }
     }
 }
@@ -708,6 +695,9 @@ impl Into<(AABB, AABB)> for TwoVolume {
 #[cfg(feature = "avx512")]
 pub fn hi() {
     println!("bvh avx512");
+
+    #[cfg(feature = "fast-reciprocal")]
+    println!("_mm512_rcp14_ps is enabled");
 }
 
 #[cfg(feature = "avx512")]
@@ -718,30 +708,41 @@ pub struct TwoRay {
 
 #[cfg(feature = "avx512")]
 impl TwoRay {
-    pub fn new(ray: Ray) -> Self {
-        unsafe {
-            Self {
-                origin: _mm512_set_pd(
-                    ray.origin.x,
-                    ray.origin.x,
-                    ray.origin.y,
-                    ray.origin.y,
-                    ray.origin.z,
-                    ray.origin.z,
-                    0.0,
-                    0.0,
-                ),
-                inv_dir: _mm512_set_pd(
-                    1.0 / ray.direction.x,
-                    1.0 / ray.direction.x,
-                    1.0 / ray.direction.y,
-                    1.0 / ray.direction.y,
-                    1.0 / ray.direction.z,
-                    1.0 / ray.direction.z,
-                    1.0,
-                    1.0,
-                ),
-            }
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn new(ray: Ray) -> Self {
+        Self {
+            origin: _mm512_set_pd(
+                ray.origin.x,
+                ray.origin.x,
+                ray.origin.y,
+                ray.origin.y,
+                ray.origin.z,
+                ray.origin.z,
+                0.0,
+                0.0,
+            ),
+            #[cfg(feature = "fast-reciprocal")]
+            inv_dir: _mm512_rcp14_pd(_mm512_set_pd(
+                ray.direction.x,
+                ray.direction.x,
+                ray.direction.y,
+                ray.direction.y,
+                ray.direction.z,
+                ray.direction.z,
+                1.0,
+                1.0,
+            )),
+            #[cfg(not(feature = "fast-reciprocal"))]
+            inv_dir: _mm512_set_pd(
+                1.0 / ray.direction.x,
+                1.0 / ray.direction.x,
+                1.0 / ray.direction.y,
+                1.0 / ray.direction.y,
+                1.0 / ray.direction.z,
+                1.0 / ray.direction.z,
+                1.0,
+                1.0,
+            ),
         }
     }
 }
