@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ultraviolet::DVec3;
 
 pub mod bvh;
@@ -182,4 +184,10 @@ pub trait BoundedGeometry {
     fn world_center_point(&self) -> DVec3 {
         self.local_center_point()
     }
+}
+
+pub trait Raytracable: RaytracableGeometry + BoundedGeometry {}
+
+pub struct RaytracableObject {
+    pub geometry: Arc<dyn Raytracable>,
 }

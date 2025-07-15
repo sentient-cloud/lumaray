@@ -9,6 +9,7 @@ name = "lumaray"
 path = "src/main.rs"
 
 [dependencies]
+bytemuck = "1.21.0"
 imageproc = "0.25.0"
 itertools = "0.14.0"
 nom = "7.1.3"

@@ -404,3 +404,15 @@ impl From<RGBA> for [f64; 3] {
         [rgba.r, rgba.g, rgba.b]
     }
 }
+
+impl From<RGBA> for [u16; 4] {
+    /// Convert an RGBA color to an array of u16 values.
+    fn from(rgba: RGBA) -> Self {
+        [
+            (rgba.r * 65535.0).clamp(0.0, 65535.0) as u16,
+            (rgba.g * 65535.0).clamp(0.0, 65535.0) as u16,
+            (rgba.b * 65535.0).clamp(0.0, 65535.0) as u16,
+            (rgba.a * 65535.0).clamp(0.0, 65535.0) as u16,
+        ]
+    }
+}

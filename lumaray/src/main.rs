@@ -3,6 +3,8 @@
 #![feature(stdarch_x86_avx512)]
 #![feature(generic_const_exprs)]
 #![feature(avx512_target_feature)]
+#![feature(specialization)]
+#![feature(generic_const_items)]
 
 use core::f64;
 use std::{fs::File, io::BufReader, sync::Arc, time::Instant};
